@@ -20,7 +20,7 @@ Normally you run the program without any arguments. You may specify one single c
 
 - `totp_qr`
   
-  CrustaneRev contains a shared-secret TOTP-based admin authentication utility. If you want to, for example, nuke the database, you may utilize this feature to make sure nobody else can.
+  CrustaneRev contains a shared-secret TOTP-based admin authentication utility. If you want to, for example, nuke the database with a single command sent to the bot in a public chat, you may utilize this feature to make sure nobody else can do the same.
 
   When launching CrustaneRev with this command argument, you'll get a QR Code in terminal, generated based on hashed bot secret, and you can scan the QR code with apps like Google Authenticator to get a TOTP challenge code that can be used later for verifying administrator identity.
 
