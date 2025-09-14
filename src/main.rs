@@ -2,11 +2,14 @@ mod command;
 mod utils;
 mod error_glue;
 mod init;
+mod backend;
 
 use std::env::args;
+use std::process::exit;
 use botrs::{Client, Context, EventHandler, Intents, Token, Message, GroupMessage, GroupMessageParams};
 use botrs::models::gateway::Ready;
 use tracing::{info, warn};
+use crate::init::initialize_backend;
 use crate::utils::get_totp;
 
 struct MyBot;
@@ -47,10 +50,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("This is the administrator TOTP QR Code. Please scan!");
             qr2term::print_qr(&qr)?;
         }
+
+        if i == 1 && s == "ota_test" {
+            println!("Boop! Executable is alive.");
+            exit(0);
+        }
     }
 
     // 初始化日志
     tracing_subscriber::fmt::init();
+
+    // 初始化后端
+    let backend = initialize_backend().await?;
 
     // 创建令牌
     let token = Token::from_env().unwrap();
