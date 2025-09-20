@@ -1,7 +1,10 @@
 use std::env;
-use botrs::{Context, GroupMessage, GroupMessageParams, Message};
+use botrs::{Context, GroupMessage, GroupMessageParams};
+use tokio::fs::File;
+use tokio::io::AsyncWriteExt;
 use totp_rs::{Algorithm, Secret, TOTP};
 use crate::error_glue::CrustaneError;
+use futures::stream::StreamExt;
 
 pub(crate) fn msg_content_split_str(content: &str) -> Result<Vec<String>, CrustaneError> {
     let mut ret: Vec<String> = Vec::new();
@@ -102,4 +105,19 @@ pub(crate) fn get_totp() -> Result<TOTP, CrustaneError> {
         Some("RigoLigo Creations".to_string()),
         "CrustaneRev Admin".to_string()
     )?)
+}
+
+/// Say thanks to Google AI Overview and RustRover
+/// I couldn't have finished this function by myself
+pub(crate) async fn download_file(url: &String, dest_file: &str) -> Result<(), CrustaneError> {
+    let response = reqwest::get(url.as_str()).await?.error_for_status()?;
+
+    let mut file = File::create(dest_file).await?;
+
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        file.write_all(&chunk?).await?;
+    }
+
+    Ok(())
 }

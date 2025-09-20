@@ -3,44 +3,13 @@ mod utils;
 mod error_glue;
 mod init;
 mod backend;
+mod botevent;
 
 use std::env::args;
 use std::process::exit;
-use botrs::{Client, Context, EventHandler, Intents, Token, Message, GroupMessage, GroupMessageParams};
-use botrs::models::gateway::Ready;
-use tracing::{info, warn};
-use crate::init::initialize_backend;
+use botrs::{Client, Intents, Token};
+use botevent::BotEventHandler;
 use crate::utils::get_totp;
-
-struct MyBot;
-
-#[async_trait::async_trait]
-impl EventHandler for MyBot {
-    async fn ready(&self, _ctx: Context, ready: Ready) {
-        info!("Bot {} is ready!", ready.user.username);
-    }
-
-    async fn group_message_create(&self, ctx: Context, message: GroupMessage) {
-        if let Some(content) = &message.content {
-            let params = match utils::msg_content_split_str(content.trim()) {
-                Ok(params) => params,
-                Err(e) => {
-                    if let Err(e) = message.reply(
-                        ctx.api.as_ref(),
-                        &ctx.token,
-                        format!("字符串参数解析出错：\n{}", e).as_str()).await {
-                        warn!("回复错误信息失败：{}", e);
-                    }
-                    return
-                }
-            };
-
-            if let Err(e) = command::dispatch_call_from_group(ctx, message, params).await {
-                warn!("群消息分发时出错：{}", e);
-            }
-        }
-    }
-}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -60,8 +29,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 初始化日志
     tracing_subscriber::fmt::init();
 
-    // 初始化后端
-    let backend = initialize_backend().await?;
+    // 给SQLite添加simple分词插件
+    libsimple::enable_auto_extension().expect("libsimple cannot load");
 
     // 创建令牌
     let token = Token::from_env().unwrap();
@@ -70,7 +39,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let intents = Intents::default();
 
     // 创建客户端
-    let mut client = Client::new(token, intents, MyBot, true)?;
+    let mut client = Client::new(token, intents, BotEventHandler::default(), true)?;
 
     // 启动机器人
     client.start().await?;

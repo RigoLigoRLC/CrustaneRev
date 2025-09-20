@@ -52,3 +52,15 @@ impl From<CrustaneError> for String {
         }
     }
 }
+
+impl From<reqwest::Error> for CrustaneError {
+    fn from(e: reqwest::Error) -> Self {
+        format!("reqwest Error: {}", e).into()
+    }
+}
+
+impl From<std::io::Error> for CrustaneError {
+    fn from(e: std::io::Error) -> Self {
+        format!("IO Error: {}", e).into()
+    }
+}
