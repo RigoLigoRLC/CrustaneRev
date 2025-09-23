@@ -5,6 +5,7 @@ use tokio::io::AsyncWriteExt;
 use totp_rs::{Algorithm, Secret, TOTP};
 use crate::error_glue::CrustaneError;
 use futures::stream::StreamExt;
+use sysinfo::Group;
 
 pub(crate) fn msg_content_split_str(content: &str) -> Result<Vec<String>, CrustaneError> {
     let mut ret: Vec<String> = Vec::new();
@@ -50,6 +51,24 @@ pub(crate) fn msg_content_split(content: &String) -> Result<Vec<String>, Crustan
     msg_content_split_str(content.as_str())
 }
 
+pub(crate) fn get_group_openid_group_msg(message: &GroupMessage) -> Result<&str, CrustaneError> {
+    if message.group_openid.is_none() {
+        Err("内部错误：message.group_openid为None".into())
+    } else {
+        Ok(message.group_openid.as_ref().unwrap().as_str())
+    }
+}
+
+pub(crate) fn get_sender_openid_group_msg(message: &GroupMessage) -> Result<&str, CrustaneError> {
+    if message.author.is_none() {
+        Err("内部错误：message.author为None".into())
+    } else if message.author.as_ref().unwrap().member_openid.is_none() {
+        Err("内部错误：message.author.member_openid为None".into())
+    } else {
+        Ok(message.author.as_ref().unwrap().member_openid.as_ref().unwrap().as_str())
+    }
+}
+
 pub(crate) async fn reply_group_simple(ctx: &Context, message: &GroupMessage, reply_content: String) -> Result<(), CrustaneError> {
     let params = GroupMessageParams {
         msg_type: 0,
@@ -64,6 +83,15 @@ pub(crate) async fn reply_group_simple(ctx: &Context, message: &GroupMessage, re
         params
     ).await?;
 
+    Ok(())
+}
+
+pub(crate) async fn reply_group_with_img(ctx: &Context, message: &GroupMessage, reply_content: String) -> Result<(), CrustaneError> {
+    // let params = GroupMessageParams {
+    //     msg_type: 0,
+    //     content: Some(reply_content),
+    //     msg_id: Some(message.id.as_deref().ok_or("message.id 为 None")?.to_string()),
+    // };
     Ok(())
 }
 

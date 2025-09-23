@@ -64,3 +64,9 @@ impl From<std::io::Error> for CrustaneError {
         format!("IO Error: {}", e).into()
     }
 }
+
+impl From<sqlx::Error> for CrustaneError {
+    fn from(e: sqlx::Error) -> Self {
+        format!("sqlx Error: {}", e).into()
+    }
+}

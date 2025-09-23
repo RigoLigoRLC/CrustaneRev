@@ -1,16 +1,18 @@
 use std::sync::RwLock;
 use std::ops::Deref;
-use botrs::{Context, EventHandler, GroupMessage, Ready};
-use chrono::Utc;
-use tracing::{info, warn};
+use botrs::{Context, EventHandler, GroupMessage, GroupMessageParams, Media, Ready};
+use chrono::{DateTime, Utc};
+use futures::StreamExt;
+use tracing::{error, info, warn};
 use crate::{backend, command, utils};
 use crate::backend::backend::Backend;
 use crate::init::initialize_backend;
 use once_cell::sync::OnceCell;
-use lazy_static::lazy_static;
+use regex::Regex;
 use size::Size;
-use crate::utils::{get_totp, reply_group_simple, reply_group_simple_str, sec_to_duration_dhms};
-use crate::backend::backend::StickerUploadDomain;
+use crate::utils::{get_totp, get_group_openid_group_msg, reply_group_simple, reply_group_simple_str, sec_to_duration_dhms, get_sender_openid_group_msg};
+use crate::backend::backend::StickerDomain;
+use crate::error_glue::CrustaneError;
 
 pub struct BotEventHandler {
     backend: OnceCell<Backend>,
@@ -18,6 +20,10 @@ pub struct BotEventHandler {
     backend_init_called: RwLock<bool>,
 
     last_totp_code: RwLock<String>,
+    superuser_openid: RwLock<String>,
+    superuser_verify_timestamp: RwLock<DateTime<Utc>>,
+
+    facetype_garbage_regex: Regex,
 }
 
 #[async_trait::async_trait]
@@ -60,6 +66,9 @@ impl Default for BotEventHandler {
             backend_init_msg: RwLock::default(),
             backend_init_called: RwLock::default(),
             last_totp_code: RwLock::default(),
+            superuser_openid: RwLock::default(),
+            superuser_verify_timestamp: RwLock::default(),
+            facetype_garbage_regex: Regex::new(r#"<faceType=.+?>"#).unwrap(),
         }
     }
 }
@@ -97,6 +106,16 @@ impl BotEventHandler {
         }
     }
 
+    fn verify_superuser_privilege_group(&self, message: &GroupMessage) -> Result<(), String> {
+        if *self.superuser_verify_timestamp.read().unwrap() + chrono::Duration::minutes(30) < Utc::now() {
+            Err("上次验证已超过30分钟时限，请重新使用“su <TOTP Challenge>”验证。".into())
+        } else if get_sender_openid_group_msg(message)? == *self.superuser_openid.read().unwrap() {
+            Err("超级用户权限校验失败。".into())
+        } else {
+            Ok(())
+        }
+    }
+
     async fn dispatch_call_from_group(&self, ctx: Context, message: GroupMessage, mut params: Vec<String>) -> Result<(), String> {
         if params.is_empty() {
             return Ok(reply_group_simple_str(&ctx, &message, "请输入命令").await?);
@@ -125,76 +144,83 @@ impl BotEventHandler {
                 ).await
             },
 
-            "purge_db" => {
+            "su" => 'su: {
+                // su - verify superuser identity
+                // su exit/<totp challenge>
+                if params.len() != 1 {
+                    break 'su reply_group_simple_str(&ctx, &message, "必须携带一个参数：exit，或者TOTP Challenge。").await;
+                }
+
                 let totp = get_totp();
 
                 if totp.is_err() {
                     let err_msg = format!("创建TOTP生成器失败：{}", totp.unwrap_err().to_string());
                     tracing::log::warn!("{}", err_msg);
-                    return Ok(reply_group_simple(&ctx, &message, err_msg).await?);
+                    break 'su reply_group_simple(&ctx, &message, err_msg).await;
                 }
 
                 let totp_code = totp.unwrap().generate_current();
                 if totp_code.is_err() {
                     let err_msg = format!("生成TOTP Challenge失败：{}", totp_code.unwrap_err().to_string());
                     tracing::log::warn!("{}", err_msg);
-                    return Ok(reply_group_simple(&ctx, &message, err_msg).await?);
+                    break 'su reply_group_simple(&ctx, &message, err_msg).await;
                 }
 
-                if params.len() < 4 ||
-                    params[0].to_lowercase() != "i'm" ||
-                    params[1].to_lowercase() != "absolutely" ||
-                    params[2].to_lowercase() != "sure" ||
-                    params[3] != totp_code.unwrap() {
-
-                    tracing::log::warn!("有用户尝试执行数据库重建，但被阻止了。命令原文：{}", message.content.as_ref().unwrap());
-                    reply_group_simple(&ctx, &message, String::from("无法执行：未输入正确的TOTP Challenge或者解除安全保护指令。")).await
-                } else if params[3] == *self.last_totp_code.read().unwrap() {
-
-                    reply_group_simple(&ctx, &message, String::from("无法执行：此TOTP Challenge刚刚成功使用过。")).await
+                if params[0] == "exit" {
+                    (*self.superuser_openid.write().unwrap()).clear();
+                    reply_group_simple_str(&ctx, &message, "您已退出超级用户状态。").await
+                } else if params[0] == *self.last_totp_code.read().unwrap() {
+                    reply_group_simple_str(&ctx, &message, "无法执行：此TOTP Challenge刚刚成功使用过。").await
                 } else {
-                    *self.last_totp_code.write().unwrap() = params[3].clone();
-
-                    reply_group_simple(&ctx, &message, String::from("执行了数据库重建。之前的所有数据已经备份，数据库已恢复至初始状态。")).await
+                    *self.last_totp_code.write().unwrap() = params[0].clone();
+                    *self.superuser_verify_timestamp.write().unwrap() = Utc::now();
+                    (*self.superuser_openid.write().unwrap()).push_str(get_sender_openid_group_msg(&message)?);
+                    reply_group_simple_str(&ctx, &message, "您已成功验证超级用户权限。此状态可自动在进行特权操作后维持30分钟。").await
                 }
             }
 
-            "/su" => 'su: {
+            "purge_db" => {
+                match self.verify_superuser_privilege_group(&message) {
+                    Ok(()) => reply_group_simple_str(&ctx, &message, "还没实现").await,
+                    Err(e) => reply_group_simple(&ctx, &message, e).await
+                }
+            }
+
+            "/su" => '_su: {
                 // Sticker Upload -
                 // /su [.u/.user/.g/.group] tag [..tags] WithOneImageAttachment
                 self.backend_init().await?;
 
                 // Ensure exactly one image attachment
                 if message.attachments.len() != 1 {
-                    break 'su reply_group_simple(&ctx, &message, "需要在消息中附带1个图片才可使用。".into()).await;
+                    break '_su reply_group_simple_str(&ctx, &message, "需要在消息中附带1个图片才可使用。").await;
                 }
 
                 // Get the corresponding OpenID for the specified domain
                 let domain = if params.len() >= 2 && params[0].starts_with(".") {
                     let ret = match &params[0][1..] {
-                        "g" | "group" => StickerUploadDomain::Group,
-                        "u" | "user" | _ => StickerUploadDomain::User,
+                        "g" | "group" => StickerDomain::Group,
+                        "u" | "user" | _ => StickerDomain::User,
                     };
                     params.remove(0); // Get rid of the domain specifier
                     ret
-                } else { StickerUploadDomain::User };
+                } else { StickerDomain::User };
                 let domain_openid = match domain {
-                    StickerUploadDomain::Group => if message.group_openid.is_none() {
-                        break 'su reply_group_simple(&ctx, &message, "内部错误：message.group_openid为None".into()).await
-                    } else {
-                        &message.group_openid.as_ref().unwrap()
-                    },
-                    StickerUploadDomain::User => if message.author.is_none() {
-                        break 'su reply_group_simple(&ctx, &message, "内部错误：message.author为None".into()).await
-                    } else if message.author.as_ref().unwrap().member_openid.is_none() {
-                        break 'su reply_group_simple(&ctx, &message, "内部错误：message.author.member_openid为None".into()).await
-                    } else {
-                        &message.author.as_ref().unwrap().member_openid.as_ref().unwrap()
-                    }
+                    StickerDomain::Group => get_group_openid_group_msg(&message)?,
+                    StickerDomain::User => get_sender_openid_group_msg(&message)?,
                 };
+
+                // After removing domain specifier, there should be at least one argument left
+                if params.len() == 0 {
+                    break '_su reply_group_simple(&ctx, &message, "必须为表情图片指定标签才可添加。".into()).await
+                }
 
                 // Join all specified tags with space
                 let tags = params.join(" ");
+
+                // Remove potential garbage data like "<faceType=6, faceId=0, ext=...>"
+                // This may happen if user inserted QQ Stickers inside the text
+                let tags = self.facetype_garbage_regex.replace_all(tags.as_str(), "").to_string();
 
                 // Generate a UUID as the image file name
                 let atta = message.attachments.first().unwrap();
@@ -213,6 +239,56 @@ impl BotEventHandler {
                     reply_group_simple(&ctx, &message, format!("添加表情错误：{}", e)).await
                 } else {
                     reply_group_simple(&ctx, &message, "成功添加了一个表情。".into()).await
+                }
+            }
+
+            "/ss" => '_ss: {
+                // Sticker search -
+                // /sa keyword
+
+                if params.len() == 0 {
+                    break '_ss reply_group_simple_str(&ctx, &message, "必须指定搜索关键字。").await;
+                }
+
+                match self.backend().sticker_query_simple(
+                    params.join(" "),
+                    get_sender_openid_group_msg(&message)?,
+                    get_sender_openid_group_msg(&message)?
+                ).await {
+                    Ok(result) => {
+                        let result = result
+                            .iter()
+                            .map(|it| format!("ID={} Tag=“{}”", it.id, it.tags))
+                            .collect::<Vec<String>>()
+                            .join("\n");
+
+                        info!("查询结果：\n{}", result);
+
+                        reply_group_simple(&ctx, &message, result).await
+                    },
+                    Err(e) => reply_group_simple(&ctx, &message, e).await
+                }
+            }
+
+            "ssi" => 'ssi: {
+                if params.len() == 0 {
+                    break 'ssi reply_group_simple_str(&ctx, &message, "必须指定搜索关键字。").await;
+                }
+
+                match self.backend().sticker_id_query_domainless(params.join(" ")).await {
+                    Ok(result) => {
+                        let result = result
+                            .iter()
+                            .map(|it| format!("ID={}", it))
+                            .collect::<Vec<String>>()
+                            .join("\n");
+                        info!("查询结果：\n{}", result);
+                        reply_group_simple(&ctx, &message, result).await
+                    },
+                    Err(e) => {
+                        error!("数据库操作失败\n{}", e);
+                        reply_group_simple(&ctx, &message, e).await
+                    }
                 }
             }
 
