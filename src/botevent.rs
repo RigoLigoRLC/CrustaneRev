@@ -2,15 +2,18 @@ use std::sync::RwLock;
 use std::ops::Deref;
 use botrs::{Context, EventHandler, GroupMessage, GroupMessageParams, Media, Ready};
 use chrono::{DateTime, Utc};
+use chrono::format::parse;
 use futures::StreamExt;
 use tracing::{error, info, warn};
 use crate::{backend, command, utils};
-use crate::backend::backend::Backend;
+use crate::backend::backend::{Backend, StickerLiberatorOperation, StickerRecipient};
 use crate::init::initialize_backend;
 use once_cell::sync::OnceCell;
 use regex::Regex;
+use serde_json::Value;
 use size::Size;
-use crate::utils::{get_totp, get_group_openid_group_msg, reply_group_simple, reply_group_simple_str, sec_to_duration_dhms, get_sender_openid_group_msg};
+use sqlx::query;
+use crate::utils::{get_totp, get_group_openid_group_msg, reply_group_simple, reply_group_simple_str, sec_to_duration_dhms, get_sender_openid_group_msg, reply_group_with_media};
 use crate::backend::backend::StickerDomain;
 use crate::error_glue::CrustaneError;
 
@@ -106,13 +109,36 @@ impl BotEventHandler {
         }
     }
 
-    fn verify_superuser_privilege_group(&self, message: &GroupMessage) -> Result<(), String> {
+    fn verify_totp_challenge(&self, challenge: &str) -> Result<(), String> {
+        let totp = get_totp();
+
+        if totp.is_err() {
+            let err_msg = format!("创建TOTP生成器失败：{}", totp.unwrap_err().to_string());
+            tracing::log::warn!("{}", err_msg);
+            return Err(err_msg);
+        }
+
+        let totp_code = totp.unwrap().generate_current();
+        if totp_code.is_err() {
+            let err_msg = format!("生成TOTP Challenge失败：{}", totp_code.unwrap_err().to_string());
+            tracing::log::warn!("{}", err_msg);
+            return Err(err_msg);
+        }
+
+        if challenge == *self.last_totp_code.read().unwrap() {
+            Err("无法执行：此TOTP Challenge刚刚成功使用过。".into())
+        } else {
+            *self.last_totp_code.write().unwrap() = challenge.into();
+            *self.superuser_verify_timestamp.write().unwrap() = Utc::now();
+            Ok(())
+        }
+    }
+
+    fn verify_superuser_privilege_group(&self, message: &GroupMessage) -> Result<bool, String> {
         if *self.superuser_verify_timestamp.read().unwrap() + chrono::Duration::minutes(30) < Utc::now() {
             Err("上次验证已超过30分钟时限，请重新使用“su <TOTP Challenge>”验证。".into())
-        } else if get_sender_openid_group_msg(message)? == *self.superuser_openid.read().unwrap() {
-            Err("超级用户权限校验失败。".into())
         } else {
-            Ok(())
+            Ok(get_sender_openid_group_msg(message)? == *self.superuser_openid.read().unwrap())
         }
     }
 
@@ -151,38 +177,123 @@ impl BotEventHandler {
                     break 'su reply_group_simple_str(&ctx, &message, "必须携带一个参数：exit，或者TOTP Challenge。").await;
                 }
 
-                let totp = get_totp();
-
-                if totp.is_err() {
-                    let err_msg = format!("创建TOTP生成器失败：{}", totp.unwrap_err().to_string());
-                    tracing::log::warn!("{}", err_msg);
-                    break 'su reply_group_simple(&ctx, &message, err_msg).await;
-                }
-
-                let totp_code = totp.unwrap().generate_current();
-                if totp_code.is_err() {
-                    let err_msg = format!("生成TOTP Challenge失败：{}", totp_code.unwrap_err().to_string());
-                    tracing::log::warn!("{}", err_msg);
-                    break 'su reply_group_simple(&ctx, &message, err_msg).await;
-                }
-
                 if params[0] == "exit" {
                     (*self.superuser_openid.write().unwrap()).clear();
                     reply_group_simple_str(&ctx, &message, "您已退出超级用户状态。").await
-                } else if params[0] == *self.last_totp_code.read().unwrap() {
-                    reply_group_simple_str(&ctx, &message, "无法执行：此TOTP Challenge刚刚成功使用过。").await
                 } else {
-                    *self.last_totp_code.write().unwrap() = params[0].clone();
-                    *self.superuser_verify_timestamp.write().unwrap() = Utc::now();
-                    (*self.superuser_openid.write().unwrap()).push_str(get_sender_openid_group_msg(&message)?);
-                    reply_group_simple_str(&ctx, &message, "您已成功验证超级用户权限。此状态可自动在进行特权操作后维持30分钟。").await
+                    match self.verify_totp_challenge(params[0].as_str()) {
+                        Ok(_) => {
+                            (*self.superuser_openid.write().unwrap()).push_str(get_sender_openid_group_msg(&message)?);
+                            reply_group_simple_str(&ctx, &message, "您已成功验证超级用户权限。此状态可自动在进行特权操作后维持30分钟。").await
+                        }
+                        Err(e) => reply_group_simple(&ctx, &message, e).await
+                    }
                 }
             }
 
-            "purge_db" => {
+            "purge_db" => 'purge_db: {
                 match self.verify_superuser_privilege_group(&message) {
-                    Ok(()) => reply_group_simple_str(&ctx, &message, "还没实现").await,
+                    Ok(is_su) => {
+                        if !is_su {
+                            break 'purge_db reply_group_simple_str(&ctx, &message, "您不是验证的超级用户，无法执行。").await
+                        }
+                        reply_group_simple_str(&ctx, &message, "还没实现").await
+                    },
                     Err(e) => reply_group_simple(&ctx, &message, e).await
+                }
+            }
+
+            "liberator" => 'liberator: {
+                // liberator - become/quit as a liberator.
+                // liberator become/quit <TOTP Challenge>
+                let usage = || reply_group_simple_str(&ctx, &message, "liberator become/quit <TOTP Challenge>");
+                if params.len() > 2 || params.is_empty() {
+                    break 'liberator usage().await
+                }
+
+                let openid = get_sender_openid_group_msg(&message)?;
+                let verification = match self.backend().sticker_liberator_ops(openid, StickerLiberatorOperation::Verify).await {
+                    Ok(verification) => verification,
+                    Err(e) => break 'liberator Err(e)
+                };
+
+                match params[0].as_str() {
+                    "become" => {
+                        match self.verify_totp_challenge(params[1].as_str()) {
+                            Ok(()) => {
+                                if verification != 0 {
+                                    reply_group_simple_str(&ctx, &message, "您已经是解放者了。").await
+                                } else {
+                                    match self.backend().sticker_liberator_ops(openid, StickerLiberatorOperation::Add).await {
+                                        Ok(_) => reply_group_simple_str(&ctx, &message, "您成为了解放者；您今后上传的表情包所有人都将可搜索。\n如您想将以往的表情包都变为所有人可搜索的状态，请使用“liberate”命令。").await,
+                                        Err(e) => reply_group_simple(&ctx, &message, format!("无法成为解放者：{}", e)).await,
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                reply_group_simple(&ctx, &message, format!("无法成为解放者：TOTP验证失败：{}", e)).await
+                            }
+                        }
+                    }
+                    "quit" => {
+                        if verification != 0 {
+                            match self.backend().sticker_liberator_ops(openid, StickerLiberatorOperation::Remove).await {
+                                Ok(_) => reply_group_simple_str(&ctx, &message, "您已不再是解放者。").await,
+                                Err(e) => reply_group_simple(&ctx, &message, format!("无法成为解放者：{}", e)).await,
+                            }
+                        } else {
+                            reply_group_simple_str(&ctx, &message, "您已经是解放者了。").await
+                        }
+                    }
+                    _ => break 'liberator usage().await,
+                }
+
+            }
+
+            "liberate" => 'liberate: {
+                // liberate - liberate all of the user's stickers. The user must have already
+                // become a liberator or be verified as superuser.
+                // A liberator can liberate his own stickers. The superuser can liberate any sticker
+                // with an ID.
+                // liberate [id]
+                // If no ID is provided, the current verified user's all stickers will be liberated.
+                let openid = get_sender_openid_group_msg(&message)?;
+                let is_superuser =  match self.verify_superuser_privilege_group(&message) {
+                    Ok(is_su) => is_su,
+                    Err(e) => break 'liberate reply_group_simple(&ctx, &message, e).await
+                };
+                let is_liberator = match self.backend().sticker_liberator_ops(openid, StickerLiberatorOperation::Verify).await {
+                    Ok(n) => n != 0,
+                    Err(e) => break 'liberate reply_group_simple(&ctx, &message, e.into()).await
+                };
+                if !is_superuser && !is_liberator {
+                    break 'liberate reply_group_simple_str(&ctx, &message, "您无权公有化您的表情包。只有超级用户或者经过TOTP验证的解放者有权操作。").await;
+                }
+
+                if params.len() == 0 {
+                    let openid = get_sender_openid_group_msg(&message)?;
+                    match self.backend().sticker_liberate_all(openid).await {
+                        Ok(count) => reply_group_simple(&ctx, &message, format!("公有化了{}个表情包。", count)).await,
+                        Err(e) => reply_group_simple(&ctx, &message, e).await,
+                    }
+                } else if params.len() == 1 {
+                    let id = match params[0].parse::<i64>() {
+                        Ok(id) => id,
+                        Err(e) => break 'liberate reply_group_simple(&ctx, &message, format!("参数指定的ID无法转换为i64：{}", e)).await
+                    };
+
+                    if !match self.backend().sticker_exists(id).await {
+                        Ok(x) => x,
+                        Err(e) => break 'liberate reply_group_simple(&ctx, &message, e).await,
+                    } {
+                        break 'liberate reply_group_simple(&ctx, &message, format!("不存在ID={}的表情包。", id)).await
+                    }
+                    match self.backend().sticker_liberate_one(is_superuser, openid, id).await {
+                        Ok(()) => reply_group_simple(&ctx, &message, format!("公有化了ID={}的表情包。", id)).await,
+                        Err(e) => reply_group_simple(&ctx, &message, e).await,
+                    }
+                } else {
+                    break 'liberate reply_group_simple_str(&ctx, &message, "liberate [表情ID]").await;
                 }
             }
 
@@ -205,9 +316,10 @@ impl BotEventHandler {
                     params.remove(0); // Get rid of the domain specifier
                     ret
                 } else { StickerDomain::User };
+                let uploader_openid = get_sender_openid_group_msg(&message)?;
                 let domain_openid = match domain {
                     StickerDomain::Group => get_group_openid_group_msg(&message)?,
-                    StickerDomain::User => get_sender_openid_group_msg(&message)?,
+                    StickerDomain::User => uploader_openid,
                 };
 
                 // After removing domain specifier, there should be at least one argument left
@@ -233,12 +345,11 @@ impl BotEventHandler {
                     }
                 );
 
-                if let Err(e) = self.backend().handle_sticker_upload(
-                    atta.url.as_ref().unwrap(), filename, domain_openid, tags
+                match self.backend().handle_sticker_upload(
+                    atta.url.as_ref().unwrap(), filename, domain_openid, uploader_openid, tags
                 ).await {
-                    reply_group_simple(&ctx, &message, format!("添加表情错误：{}", e)).await
-                } else {
-                    reply_group_simple(&ctx, &message, "成功添加了一个表情。".into()).await
+                    Ok(id) => reply_group_simple(&ctx, &message, format!("成功添加了一个表情，ID={}。", id)).await,
+                    Err(e) => reply_group_simple(&ctx, &message, format!("添加表情错误：{}", e)).await
                 }
             }
 
@@ -253,18 +364,37 @@ impl BotEventHandler {
                 match self.backend().sticker_query_simple(
                     params.join(" "),
                     get_sender_openid_group_msg(&message)?,
-                    get_sender_openid_group_msg(&message)?
+                    get_group_openid_group_msg(&message)?
                 ).await {
                     Ok(result) => {
-                        let result = result
+                        let mut result_str = result
                             .iter()
                             .map(|it| format!("ID={} Tag=“{}”", it.id, it.tags))
                             .collect::<Vec<String>>()
                             .join("\n");
 
-                        info!("查询结果：\n{}", result);
+                        info!("查询结果：\n{}", result_str);
 
-                        reply_group_simple(&ctx, &message, result).await
+                        if result.is_empty() {
+                            reply_group_simple_str(&ctx, &message, "查询的关键词没有任何匹配项。").await
+                        } else {
+                            let candidate = result.into_iter().next().unwrap();
+                            let media = match self.backend().sticker_upload_to_tencent(
+                                &ctx,
+                                StickerRecipient::Group,
+                                get_group_openid_group_msg(&message)?,
+                                candidate.id,
+                                candidate.filename
+                            ).await {
+                                Ok(media) => Some(media),
+                                Err(e) => {
+                                    result_str = format!("{}\n\n无法将首选图片上传。原因：{}", result_str, e);
+                                    None
+                                }
+                            };
+
+                            reply_group_with_media(&ctx, &message, result_str, media).await
+                        }
                     },
                     Err(e) => reply_group_simple(&ctx, &message, e).await
                 }
@@ -292,7 +422,7 @@ impl BotEventHandler {
                 }
             }
 
-            _ => reply_group_simple(&ctx, &message, format!("未知的指令：{}", params[0])).await
+            unknown => reply_group_simple(&ctx, &message, format!("未知的指令：{}", unknown)).await
         }?;
 
         Ok(())

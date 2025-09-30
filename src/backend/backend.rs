@@ -4,8 +4,8 @@ use std::sync::LazyLock;
 use aws_config::{defaults, BehaviorVersion};
 use aws_sdk_s3::primitives::ByteStream;
 use botrs::{Context, Media};
-use chrono::{Utc, DateTime, FixedOffset, TimeZone};
-use regex::Regex;
+use chrono::{Utc, DateTime, FixedOffset, TimeZone, ParseResult};
+use regex::{Match, Regex};
 use sqlx::migrate::MigrateDatabase;
 use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::{query, query_as, Column, FromRow, Row};
@@ -38,6 +38,18 @@ pub enum StickerRecipient {
     Group,
 }
 
+/// Operations on Sticker liberators
+pub enum StickerLiberatorOperation {
+    Add,
+    Verify,
+    Remove,
+}
+
+#[derive(Debug, FromRow)]
+pub struct DbMetaResult {
+    pub(crate) value: String,
+}
+
 #[derive(Debug, FromRow)]
 pub struct StickerQueryResultSimple {
     pub(crate) id: i64,
@@ -46,8 +58,13 @@ pub struct StickerQueryResultSimple {
 }
 
 #[derive(Debug, FromRow)]
-pub struct StickerIdQueryDomainlessResult {
+pub struct StickerIdQueryResult {
     pub(crate) id: i64,
+}
+
+#[derive(Debug, FromRow)]
+pub struct StickerUploaderOpenIdQueryResult {
+    pub(crate) uploader_openid: String,
 }
 
 #[derive(Debug, FromRow)]
@@ -58,19 +75,39 @@ struct StickerCacheS3QueryResult {
 
 #[derive(Debug, FromRow)]
 struct StickerCacheTencentQueryResult {
-    pub url: String,
+    pub media: String,
     pub expiration_timestamp: i64,
 }
+
+const CURRENT_DB_VERSION: i64 = 2;
 
 fn expiry_date_parse(expiration_str: String) -> i64 {
     static EXPIRY_DATE_RE: LazyLock<Regex, fn() -> Regex> = LazyLock::new(|| Regex::new(r#"expiry-date="(.+?)""#).unwrap());
     debug!("Parsing expiration date: {}", expiration_str);
-    EXPIRY_DATE_RE.find(expiration_str.as_ref()).map_or(
-        Utc::now().timestamp(),
-        |s| DateTime::parse_from_str(
-            expiration_str.as_ref(), "%a, %m %b %Y %H:%M:%S %Z"
-        ).unwrap_or(Utc::now().into()).timestamp()
-    )
+    match EXPIRY_DATE_RE.captures(expiration_str.as_ref()) {
+        None => {
+            error!("Expiration date not matched inside expiry date string, using current time");
+            Utc::now().timestamp()
+        }
+        Some(cap) => {
+            match cap.get(1) {
+                None => {
+                    error!("Cannot get 1st capture group, using current time");
+                    Utc::now().timestamp()
+                }
+                Some(s) => match DateTime::parse_from_rfc2822(s.as_str()) {
+                    Ok(time) => {
+                        info!("Parsed time: {}", time.to_rfc2822());
+                        time.timestamp()
+                    }
+                    Err(e) => {
+                        error!("Failed to parse expiration date: {}, using current tme", e);
+                        Utc::now().timestamp()
+                    }
+                }
+            }
+        }
+    }
 }
 
 async fn create_initial_tables(pool: &sqlx::SqlitePool) -> Result<(), sqlx::Error> {
@@ -93,7 +130,9 @@ async fn create_initial_tables(pool: &sqlx::SqlitePool) -> Result<(), sqlx::Erro
             filename TEXT NOT NULL,
             tags TEXT NOT NULL,
             added_date TEXT NOT NULL,
-            domain_openid TEXT
+            domain_openid TEXT,
+            view_level INTEGER NOT NULL,
+            uploader_openid TEXT NOT NULL,
         );
 
         -- Stickers search table
@@ -104,16 +143,17 @@ async fn create_initial_tables(pool: &sqlx::SqlitePool) -> Result<(), sqlx::Erro
             tokenize='simple'
         );
 
-        -- Tencent cache layer (L1)
-        CREATE TABLE IF NOT EXISTS sticker_cache_tencent_group (
-            id INTEGER PRIMARY KEY,
-            url TEXT NOT NULL,
-            expiration_timestamp INTEGER NOT NULL
+        -- Sticker liberators
+        CREATE TABLE IF NOT EXISTS sticker_liberators (
+            openid TEXT PRIMARY KEY NOT NULL
         );
-        CREATE TABLE IF NOT EXISTS sticker_cache_tencent_user (
+
+        -- Tencent cache layer (L1)
+        CREATE TABLE IF NOT EXISTS sticker_cache_tencent (
             id INTEGER PRIMARY KEY,
-            url TEXT NOT NULL,
-            expiration_timestamp INTEGER NOT NULL
+            media TEXT NOT NULL,
+            expiration_timestamp INTEGER NOT NULL,
+            chat_type INTEGER NOT NULL
         );
 
         -- S3 cache layer (L2)
@@ -147,7 +187,40 @@ async fn create_initial_tables(pool: &sqlx::SqlitePool) -> Result<(), sqlx::Erro
     Ok(())
 }
 
-async fn database_migration_or_initialization(pool: &sqlx::SqlitePool) -> Result<(), sqlx::Error> {
+async fn database_meta(pool: &sqlx::SqlitePool, key: &str) -> Result<Option<String>, sqlx::Error> {
+    match query_as::<_, DbMetaResult>(
+        "SELECT value FROM crustanerev_meta WHERE key=?"
+    ).bind(key).fetch_all(pool).await {
+        Ok(x) => Ok(x.into_iter().next().map(|x| x.value)),
+        Err(e) => Err(e)
+    }
+}
+
+async fn database_version(pool: &sqlx::SqlitePool) -> Result<i64, CrustaneError> {
+    let str_val = match database_meta(pool, "VERSION").await {
+        Ok(x) => if let Some(x) = x { x } else {
+            return Err("严重错误：数据库非空，但crustanerev_meta表中没有VERSION键！".into())
+        },
+        Err(e) => return Err(format!("查询数据库元数据VERSION时出错：{}", e).into())
+    };
+    match str_val.parse::<i64>() {
+        Ok(x) => Ok(x),
+        Err(e) => Err(format!("数据库元数据VERSION（{}）不是有效的i64：{}", str_val, e).into())
+    }
+}
+
+async fn database_upgraded_to(pool: &sqlx::SqlitePool, new_version: i64) -> Result<i64, CrustaneError> {
+    match query("UPDATE crustanerev_meta SET value=? WHERE key=?")
+        .bind(new_version.to_string())
+        .bind("VERSION")
+        .fetch_all(pool)
+        .await {
+        Ok(_) => Ok(new_version),
+        Err(e) => Err(format!("无法将数据库版本翻到{}：{}", new_version, e).into())
+    }
+}
+
+async fn database_migration_or_initialization(pool: &sqlx::SqlitePool) -> Result<(), CrustaneError> {
     let meta_table =
         query("SELECT name FROM sqlite_master WHERE type='table' AND name='crustanerev_meta'")
             .fetch_all(pool)
@@ -157,7 +230,18 @@ async fn database_migration_or_initialization(pool: &sqlx::SqlitePool) -> Result
         info!("数据库中没有任何表，将创建新的表结构");
         create_initial_tables(pool).await?;
     } else {
+        let mut version: i64 = database_version(pool).await?;
+        if version == CURRENT_DB_VERSION {
+            return Ok(());
+        }
 
+        if version == 1 {
+            // V1 -> V2: view_level=1 应全变为 view_level=100
+            query("UPDATE stickers SET view_level=100 WHERE view_level=1").fetch_all(pool).await?;
+            version = database_upgraded_to(pool, 2).await?;
+        }
+
+        info!("数据库已升级到版本{}。", version);
     }
 
     Ok(())
@@ -231,20 +315,30 @@ impl Backend {
         url: &String,
         file_name: String,
         domain_openid: &str,
+        uploader_openid: &str,
         tags: String,
-    ) -> Result<(), String> {
+    ) -> Result<i64, String> {
         let output_path = self.sticker_store_path.join(&file_name);
         utils::download_file(url, output_path.to_str().unwrap()).await?;
 
-        match query(
-            "INSERT INTO stickers (filename, tags, added_date, domain_openid)
-             VALUES (?, ?, datetime('now', 'localtime'), ?)")
+        let view_level = match self.sticker_liberator_ops(domain_openid, StickerLiberatorOperation::Verify).await {
+            Ok(n) => if n != 0 { 0 } else { 100 },
+            Err(e) => return Err(e.into())
+        };
+
+        match query_as::<_, StickerIdQueryResult>("
+            INSERT INTO stickers (filename, tags, added_date, domain_openid, view_level, uploader_openid)
+             VALUES (?, ?, datetime('now', 'localtime'), ?, ?, ?)
+             RETURNING id
+        ")
             .bind(file_name)
             .bind(tags)
             .bind(domain_openid)
+            .bind(view_level)
+            .bind(uploader_openid)
             .fetch_all(&self.db).await {
 
-            Ok(_) => Ok(()),
+            Ok(x) => Ok(x.into_iter().next().unwrap().id),
             Err(e) => {
                 let rm_msg = match tokio::fs::remove_file(output_path).await {
                     Ok(_) => "".into(),
@@ -252,23 +346,6 @@ impl Backend {
                 };
                 Err(format!("数据库操作出错：{}{}", e, rm_msg))
             }
-        }
-    }
-
-    pub async fn sticker_id_query_domainless(
-        &self,
-        keyword: String
-    ) -> Result<Vec<i64>, String> {
-        match query_as::<_, StickerIdQueryDomainlessResult>("
-            SELECT s.id
-            FROM stickers s
-            JOIN stickers_search ss ON s.id=ss.rowid
-            WHERE stickers_search MATCH simple_query(?)
-        ")
-            .bind(keyword)
-            .fetch_all(&self.db).await {
-            Ok(result) => Ok(result.iter().map(|it| it.id).collect()),
-            Err(e) => Err(format!("数据库操作出错：{}", e))
         }
     }
 
@@ -282,12 +359,91 @@ impl Backend {
             SELECT s.id, s.filename, s.tags
             FROM stickers s
             JOIN stickers_search ss ON s.id=ss.rowid
-            WHERE stickers_search MATCH simple_query(?)
+            WHERE
+                stickers_search MATCH simple_query(?) AND
+                (s.domain_openid IN (?, ?) OR s.view_level = 0)
             LIMIT 20
         "
         ).bind(keyword).bind(user_openid).bind(group_openid).fetch_all(&self.db).await {
             Ok(result) => Ok(result),
             Err(e) => Err(format!("数据库操作出错：{}", e))
+        }
+    }
+
+    pub async fn sticker_id_query_domainless(
+        &self,
+        keyword: String
+    ) -> Result<Vec<i64>, String> {
+        match query_as::<_, StickerIdQueryResult>("
+            SELECT s.id
+            FROM stickers s
+            JOIN stickers_search ss ON s.id=ss.rowid
+            WHERE stickers_search MATCH simple_query(?)
+        ")
+            .bind(keyword)
+            .fetch_all(&self.db).await {
+            Ok(result) => Ok(result.iter().map(|it| it.id).collect()),
+            Err(e) => Err(format!("数据库操作出错：{}", e))
+        }
+    }
+
+    pub async fn sticker_exists(&self, id: i64) -> Result<bool, String> {
+        match query(
+            "SELECT s.id FROM stickers s WHERE id=?"
+        ).bind(id).fetch_all(&self.db).await {
+            Ok(result) => Ok(result.len() != 0),
+            Err(e) => Err(format!("数据库操作出错：{}", e))
+        }
+    }
+
+    pub async fn sticker_liberate_all(
+        &self,
+        openid: &str
+    ) -> Result<i64, String> {
+        match query(
+            "UPDATE stickers SET view_level=0 WHERE uploader_openid=?"
+        ).bind(openid).fetch_all(&self.db).await {
+            Ok(result) => Ok(result.len() as i64),
+            Err(e) => Err(format!("数据库操作出错：{}", e))
+        }
+    }
+
+    pub async fn sticker_liberate_one(
+        &self,
+        is_superuser: bool,
+        openid: &str,
+        id: i64
+    ) -> Result<(), String> {
+        if is_superuser {
+            match query(
+                "UPDATE stickers SET view_level=0 WHERE id=?"
+            ).bind(openid).bind(id).fetch_all(&self.db).await {
+                Ok(_) => Ok(()),
+                Err(e) => Err(format!("数据库操作出错：{}", e))
+            }
+        } else {
+            let sticker_uploader_openid = match query_as::<_, StickerUploaderOpenIdQueryResult>(
+                "SELECT s.uploader_openid FROM stickers s WHERE id=?"
+            ).bind(id).fetch_all(&self.db).await {
+                Ok(x) => {
+                    if x.is_empty() {
+                        return Err(format!("找不到ID={}的表情包。", id))
+                    }
+                    x.into_iter().next().unwrap().uploader_openid
+                }
+                Err(e) => return Err(format!("数据库操作出错：{}", e))
+            };
+
+            if sticker_uploader_openid != openid {
+                return Err("抱歉，您不是超级用户，不能操作其他人上传的表情包。".into())
+            }
+
+            match query(
+                "UPDATE stickers SET view_level=0 WHERE uploader_openid_openid=? AND id=?"
+            ).bind(openid).bind(id).fetch_all(&self.db).await {
+                Ok(_) => Ok(()),
+                Err(e) => Err(format!("数据库操作出错：{}", e))
+            }
         }
     }
 
@@ -302,8 +458,9 @@ impl Backend {
             WHERE s.id=?
         ").bind(id).fetch_all(&self.db).await?;
 
-        let key = if result.is_empty() {
-            // Not cached
+        let first_result = result.into_iter().next().map_or(None, |x| Some(x));
+        let key = if first_result.is_none() || Utc::now().timestamp() + 300 > first_result.as_ref().unwrap().expiration_timestamp {
+            // Not cached or expiring in 300 seconds
             let key = Uuid::new_v4().to_string();
             let body = ByteStream::from_path(self.sticker_store_path.join(filename)).await.unwrap();
             let put_result = match self.s3.put_object()
@@ -315,33 +472,21 @@ impl Backend {
                 Ok(result) => result,
                 Err(e) => return Err(format!("S3 Error: {}", e).into())
             };
-            query("INSERT INTO sticker_cache_s3 (id, s3_key, expiration_timestamp) VALUES (?,?,?);")
+            query("
+                INSERT INTO sticker_cache_s3 (id, s3_key, expiration_timestamp)
+                VALUES (?,?,?)
+                ON CONFLICT (id) DO UPDATE SET
+                    s3_key = excluded.s3_key,
+                    expiration_timestamp = excluded.expiration_timestamp;
+            ")
                 .bind(id)
                 .bind(key.as_str())
                 .bind(expiry_date_parse(put_result.expiration.unwrap_or(String::new())))
                 .fetch_all(&self.db).await?;
             key
         } else {
-            let result2 = result.remove(0);
-            let key = result2.s3_key;
-            if result2.expiration_timestamp + 300 > Utc::now().timestamp() {
-                // Expiring in 300 seconds, copy the object
-                let new_key = Uuid::new_v4().to_string();
-                let copy_result = match self.s3.copy_object()
-                    .bucket(BUCKET_NAME)
-                    .copy_source(key)
-                    .key(new_key.as_str())
-                    .send()
-                    .await {
-                    Ok(result) => result,
-                    Err(e) => return Err(format!("S3 Error: {}", e).into())
-                };
-                query("UPDATE sticker_cache_s3 SET s3_key=? WHERE id=?").bind(new_key.as_str()).bind(id).fetch_all(&self.db).await?;
-                new_key
-            } else {
-                // Cache hit
-                key
-            }
+            // Cache hit
+            first_result.unwrap().s3_key
         };
 
         Ok(format!("{}{}", self.s3_bucket_prefix, key))
@@ -351,26 +496,35 @@ impl Backend {
         &self,
         ctx: &Context,
         recipient: StickerRecipient,
-        openid: &String,
+        openid: &str,
         id: i64,
         filename: String,
-    ) -> Result<String, CrustaneError> {
-        let table = match recipient {
-            StickerRecipient::User => "sticker_cache_tencent_user",
-            StickerRecipient::Group => "sticker_cache_tencent_group",
+    ) -> Result<Media, CrustaneError> {
+        let chat_type = match recipient {
+            StickerRecipient::User => 0,
+            StickerRecipient::Group => 1,
         };
-        let mut result = query_as::<_, StickerCacheTencentQueryResult>("
-            SELECT s.url, s.expiration_timestamp
-            FROM ? s
-            WHERE s.id=?
-        ").bind(table).bind(id).fetch_all(&self.db).await?;
 
-        if result.is_empty() || result.first().unwrap().expiration_timestamp + 300 > Utc::now().timestamp() {
+        let result = query_as::<_, StickerCacheTencentQueryResult>(
+            "SELECT s.media, s.expiration_timestamp FROM sticker_cache_tencent s WHERE s.id=? AND s.chat_type=?"
+        ).bind(id).bind(chat_type).fetch_all(&self.db).await?;
+
+        let first_result = result.first();
+        if result.is_empty() || Utc::now().timestamp() + 300 > first_result.unwrap().expiration_timestamp {
             // Have never been uploaded to Tencent at all, or Tencent cache will soon expire
             let s3_url = self.sticker_upload_to_s3(id, &filename).await?;
 
-            serde_json::from_value::<botrs::models::message::Media>(match recipient {
-                StickerRecipient::User => unimplemented!(),
+            // Try upload to Tencent
+            let result = match recipient {
+                StickerRecipient::User => {
+                    ctx.api.post_c2c_file(
+                        &ctx.token,
+                        openid,
+                        1, // image,
+                        s3_url.as_str(),
+                        None
+                    ).await?
+                },
                 StickerRecipient::Group => {
                     ctx.api.post_group_file(
                         &ctx.token,
@@ -380,9 +534,64 @@ impl Backend {
                         None
                     ).await?
                 }
-            })?;
+            };
+            let result_str = format!("{}", result);
+            let media = match serde_json::from_value::<Media>(result) {
+                Ok(media) => media,
+                Err(e) => {
+                    error!("Uploading to Tencent failed: {}", result_str);
+                    return Err(format!("Error when serde_json::from_value::<Media> from request result: {}", e).into())
+                },
+            };
 
-            todo!()
+            // Insert to database
+            let _ = query("
+                INSERT INTO sticker_cache_tencent (id, media, expiration_timestamp, chat_type)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT (id) DO UPDATE SET
+                    media = excluded.media,
+                    expiration_timestamp = excluded.expiration_timestamp
+            ")
+                .bind(id)
+                .bind(result_str)
+                .bind(Utc::now().timestamp() + media.ttl.unwrap_or(86400) as i64)
+                .bind(chat_type)
+                .fetch_all(&self.db)
+                .await?;
+
+            Ok(media)
+        } else {
+            let media_str = &first_result.unwrap().media;
+            match serde_json::from_str::<Media>(media_str.as_ref()) {
+                Ok(media) => Ok(media),
+                Err(e) => {
+                    error!("Invalid JSON entry in Tencent cache layer, id={}, json={}", id, media_str);
+                    // 删除掉有问题的项
+                    query("DELETE FROM sticker_cache_tencent where id=?").bind(id).fetch_all(&self.db).await?;
+                    Err(e.into())
+                }
+            }
+        }
+    }
+
+    pub async fn sticker_liberator_ops(
+        &self,
+        openid: &str,
+        operation: StickerLiberatorOperation
+    ) -> Result<i32, CrustaneError> {
+        match match operation {
+            StickerLiberatorOperation::Add => {
+                query("INSERT INTO sticker_liberators (openid) VALUES (?);").bind(openid)
+            }
+            StickerLiberatorOperation::Remove => {
+                query("DELETE FROM sticker_liberators WHERE openid=?;").bind(openid)
+            }
+            StickerLiberatorOperation::Verify => {
+                query("SELECT * FROM sticker_liberators WHERE openid=?").bind(openid)
+            }
+        }.fetch_all(&self.db).await {
+            Ok(result) => Ok(result.len() as i32),
+            Err(e) => Err(e.into())
         }
     }
 }

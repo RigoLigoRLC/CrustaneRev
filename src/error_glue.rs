@@ -1,6 +1,7 @@
 use std::env::VarError;
 use std::fmt::{Display, Formatter};
 use botrs::BotError;
+use crate::error_glue::CrustaneError::{BotrsError, StrError};
 
 #[derive(Debug)]
 pub(crate) enum CrustaneError {
@@ -10,7 +11,10 @@ pub(crate) enum CrustaneError {
 
 impl Display for CrustaneError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        todo!()
+        match self {
+            BotrsError(e) => write!(f, "BotrsError: {}", e),
+            StrError(e) => write!(f, "{}", e),
+        }
     }
 }
 
@@ -68,5 +72,11 @@ impl From<std::io::Error> for CrustaneError {
 impl From<sqlx::Error> for CrustaneError {
     fn from(e: sqlx::Error) -> Self {
         format!("sqlx Error: {}", e).into()
+    }
+}
+
+impl From<serde_json::Error> for CrustaneError {
+    fn from(e: serde_json::Error) -> Self {
+        format!("serde_json Error: {}", e).into()
     }
 }

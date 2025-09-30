@@ -1,11 +1,10 @@
 use std::env;
-use botrs::{Context, GroupMessage, GroupMessageParams};
+use botrs::{Context, GroupMessage, GroupMessageParams, Media};
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
 use totp_rs::{Algorithm, Secret, TOTP};
 use crate::error_glue::CrustaneError;
 use futures::stream::StreamExt;
-use sysinfo::Group;
 
 pub(crate) fn msg_content_split_str(content: &str) -> Result<Vec<String>, CrustaneError> {
     let mut ret: Vec<String> = Vec::new();
@@ -86,12 +85,21 @@ pub(crate) async fn reply_group_simple(ctx: &Context, message: &GroupMessage, re
     Ok(())
 }
 
-pub(crate) async fn reply_group_with_img(ctx: &Context, message: &GroupMessage, reply_content: String) -> Result<(), CrustaneError> {
-    // let params = GroupMessageParams {
-    //     msg_type: 0,
-    //     content: Some(reply_content),
-    //     msg_id: Some(message.id.as_deref().ok_or("message.id 为 None")?.to_string()),
-    // };
+pub(crate) async fn reply_group_with_media(ctx: &Context, message: &GroupMessage, reply_content: String, media: Option<Media>) -> Result<(), CrustaneError> {
+    let params = GroupMessageParams {
+        msg_type: 7,
+        content: Some(reply_content),
+        msg_id: Some(message.id.as_deref().ok_or("message.id 为 None")?.to_string()),
+        media,
+        ..Default::default()
+    };
+
+    ctx.api.post_group_message_with_params(
+        &ctx.token,
+        message.group_openid.as_deref().ok_or("message.group_openid 为 None")?,
+        params
+    ).await?;
+
     Ok(())
 }
 
