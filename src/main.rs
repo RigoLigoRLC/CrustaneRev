@@ -1,15 +1,15 @@
-mod command;
-mod utils;
-mod error_glue;
-mod init;
 mod backend;
 mod botevent;
+mod command;
+mod error_glue;
+mod init;
+mod utils;
 
+use crate::utils::get_totp;
+use botevent::BotEventHandler;
+use botrs::{Client, Intents, Token};
 use std::env::args;
 use std::process::exit;
-use botrs::{Client, Intents, Token};
-use botevent::BotEventHandler;
-use crate::utils::get_totp;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

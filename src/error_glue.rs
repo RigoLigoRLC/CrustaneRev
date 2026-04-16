@@ -1,12 +1,13 @@
+use crate::error_glue::CrustaneError::{BotrsError, StrError, StrLitError};
+use botrs::BotError;
 use std::env::VarError;
 use std::fmt::{Display, Formatter};
-use botrs::BotError;
-use crate::error_glue::CrustaneError::{BotrsError, StrError};
 
 #[derive(Debug)]
 pub(crate) enum CrustaneError {
     BotrsError(BotError),
     StrError(String),
+    StrLitError(&'static str),
 }
 
 impl Display for CrustaneError {
@@ -14,6 +15,7 @@ impl Display for CrustaneError {
         match self {
             BotrsError(e) => write!(f, "BotrsError: {}", e),
             StrError(e) => write!(f, "{}", e),
+            StrLitError(e) => write!(f, "{}", e),
         }
     }
 }
@@ -51,8 +53,9 @@ impl From<totp_rs::TotpUrlError> for CrustaneError {
 impl From<CrustaneError> for String {
     fn from(e: CrustaneError) -> String {
         match e {
-            CrustaneError::BotrsError(ref e) => e.to_string(),
-            CrustaneError::StrError(ref e) => e.to_string(),
+            BotrsError(ref e) => e.to_string(),
+            StrError(ref e) => e.to_string(),
+            StrLitError(e) => e.to_string(),
         }
     }
 }
