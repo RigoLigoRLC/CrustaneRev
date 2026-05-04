@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use crate::backend::backend::StickerDomain;
 use crate::backend::backend::{Backend, StickerLiberatorOperation, StickerRecipient};
 use crate::error_glue::CrustaneError;
 use crate::init::initialize_backend;
@@ -9,16 +8,10 @@ use crate::utils::{
     reply_group_simple, reply_group_simple_str, reply_group_with_media, sec_to_duration_dhms,
 };
 use crate::{backend, command, utils};
-use async_trait::async_trait;
 use botrs::{C2CMessage, Context, EventHandler, GroupMessage, GroupMessageParams, Media, Ready};
-use chrono::format::parse;
 use chrono::{DateTime, Utc};
-use futures::StreamExt;
 use once_cell::sync::OnceCell;
 use regex::Regex;
-use serde_json::Value;
-use size::Size;
-use sqlx::query;
 use std::ops::Deref;
 use std::sync::{Arc, RwLock};
 use tokio::sync::Mutex;
@@ -124,9 +117,14 @@ impl Default for BotEventHandler {
         // FIXME: This is really poorly designed, should find a better place and a better way to register commands
         ret.register_command(Box::new(command::ping::Ping));
         ret.register_command(Box::new(command::host::Host));
+        ret.register_command(Box::new(command::su::Su));
+
         ret.register_command(Box::new(command::slash_su::SlashSu::default()));
         ret.register_command(Box::new(command::slash_ss::SlashSs));
         ret.register_command(Box::new(command::slash_si::SlashSi));
+        ret.register_command(Box::new(command::ssi::Ssi));
+        ret.register_command(Box::new(command::liberate::Liberate));
+        ret.register_command(Box::new(command::liberator::Liberator));
 
         ret
     }
@@ -177,32 +175,7 @@ impl BotEventHandler {
     //     }
     //
     //     match params.remove(0) {
-    //         "su" => 'su: {
-    //             // su - verify superuser identity
-    //             // su exit/<totp challenge>
-    //             if params.len() != 1 {
-    //                 break 'su reply_group_simple_str(
-    //                     &ctx,
-    //                     &message,
-    //                     "必须携带一个参数：exit，或者TOTP Challenge。",
-    //                 )
-    //                 .await;
-    //             }
     //
-    //             if params[0] == "exit" {
-    //                 (*self.superuser_openid.write().unwrap()).clear();
-    //                 reply_group_simple_str(&ctx, &message, "您已退出超级用户状态。").await
-    //             } else {
-    //                 match self.verify_totp_challenge(params[0]) {
-    //                     Ok(_) => {
-    //                         (*self.superuser_openid.write().unwrap())
-    //                             .push_str(get_sender_openid_group_msg(&message)?);
-    //                         reply_group_simple_str(&ctx, &message, "您已成功验证超级用户权限。此状态可自动在进行特权操作后维持30分钟。").await
-    //                     }
-    //                     Err(e) => reply_group_simple(&ctx, &message, e).await,
-    //                 }
-    //             }
-    //         }
     //
     //         "purge_db" => 'purge_db: {
     //             match self.verify_superuser_privilege_group(&message) {
@@ -218,325 +191,8 @@ impl BotEventHandler {
     //             }
     //         }
     //
-    //         "liberator" => 'liberator: {
-    //             // liberator - become/quit as a liberator.
-    //             // liberator become/quit <TOTP Challenge>
-    //             let usage = || {
-    //                 reply_group_simple_str(&ctx, &message, "liberator become/quit <TOTP Challenge>")
-    //             };
-    //             if params.len() > 2 || params.is_empty() {
-    //                 break 'liberator usage().await;
-    //             }
     //
-    //             let openid = get_sender_openid_group_msg(&message)?;
-    //             let verification = match self
-    //                 .backend()
-    //                 .sticker_liberator_ops(openid, StickerLiberatorOperation::Verify)
-    //                 .await
-    //             {
-    //                 Ok(verification) => verification,
-    //                 Err(e) => break 'liberator Err(e),
-    //             };
-    //
-    //             match params[0] {
-    //                 "become" => match self.verify_totp_challenge(params[1]) {
-    //                     Ok(()) => {
-    //                         if verification != 0 {
-    //                             reply_group_simple_str(&ctx, &message, "您已经是解放者了。").await
-    //                         } else {
-    //                             match self.backend().sticker_liberator_ops(openid, StickerLiberatorOperation::Add).await {
-    //                                     Ok(_) => reply_group_simple_str(&ctx, &message, "您成为了解放者；您今后上传的表情包所有人都将可搜索。\n如您想将以往的表情包都变为所有人可搜索的状态，请使用“liberate”命令。").await,
-    //                                     Err(e) => reply_group_simple(&ctx, &message, format!("无法成为解放者：{}", e)).await,
-    //                                 }
-    //                         }
-    //                     }
-    //                     Err(e) => {
-    //                         reply_group_simple(
-    //                             &ctx,
-    //                             &message,
-    //                             format!("无法成为解放者：TOTP验证失败：{}", e),
-    //                         )
-    //                         .await
-    //                     }
-    //                 },
-    //                 "quit" => {
-    //                     if verification != 0 {
-    //                         match self
-    //                             .backend()
-    //                             .sticker_liberator_ops(openid, StickerLiberatorOperation::Remove)
-    //                             .await
-    //                         {
-    //                             Ok(_) => {
-    //                                 reply_group_simple_str(&ctx, &message, "您已不再是解放者。")
-    //                                     .await
-    //                             }
-    //                             Err(e) => {
-    //                                 reply_group_simple(
-    //                                     &ctx,
-    //                                     &message,
-    //                                     format!("无法成为解放者：{}", e),
-    //                                 )
-    //                                 .await
-    //                             }
-    //                         }
-    //                     } else {
-    //                         reply_group_simple_str(&ctx, &message, "您已经是解放者了。").await
-    //                     }
-    //                 }
-    //                 _ => break 'liberator usage().await,
-    //             }
-    //         }
-    //
-    //         "liberate" => 'liberate: {
-    //             // liberate - liberate all of the user's stickers. The user must have already
-    //             // become a liberator or be verified as superuser.
-    //             // A liberator can liberate his own stickers. The superuser can liberate any sticker
-    //             // with an ID.
-    //             // liberate [id]
-    //             // If no ID is provided, the current verified user's all stickers will be liberated.
-    //             let openid = get_sender_openid_group_msg(&message)?;
-    //             let mut auth_err_msg: String = String::new();
-    //             let is_liberator = match self
-    //                 .backend()
-    //                 .sticker_liberator_ops(openid, StickerLiberatorOperation::Verify)
-    //                 .await
-    //             {
-    //                 Ok(n) => n != 0,
-    //                 Err(e) => {
-    //                     let e = e.to_string();
-    //                     auth_err_msg.push_str(e.as_str());
-    //                     false
-    //                 }
-    //             };
-    //             let is_superuser = self.verify_superuser_privilege_group(&message);
-    //             if is_superuser.is_err() && !is_liberator {
-    //                 break 'liberate reply_group_simple(
-    //                     &ctx,
-    //                     &message,
-    //                     format!(
-    //                         "您无权公有化您的表情包。只有超级用户或者经过TOTP验证的解放者有权操作（{}）。{}{}",
-    //                         is_superuser.unwrap_err(),
-    //                         if auth_err_msg.is_empty() { "" } else { "\n\n" },
-    //                         auth_err_msg
-    //                     )
-    //                 ).await;
-    //             }
-    //
-    //             if params.len() == 0 {
-    //                 let openid = get_sender_openid_group_msg(&message)?;
-    //                 match self.backend().sticker_liberate_all(openid).await {
-    //                     Ok(count) => {
-    //                         reply_group_simple(
-    //                             &ctx,
-    //                             &message,
-    //                             format!("公有化了{}个表情包。", count),
-    //                         )
-    //                         .await
-    //                     }
-    //                     Err(e) => reply_group_simple(&ctx, &message, e).await,
-    //                 }
-    //             } else if params.len() == 1 {
-    //                 let id = match params[0].parse::<i64>() {
-    //                     Ok(id) => id,
-    //                     Err(e) => {
-    //                         break 'liberate reply_group_simple(
-    //                             &ctx,
-    //                             &message,
-    //                             format!("参数指定的ID无法转换为i64：{}", e),
-    //                         )
-    //                         .await;
-    //                     }
-    //                 };
-    //
-    //                 if !match self.backend().sticker_exists(id).await {
-    //                     Ok(x) => x,
-    //                     Err(e) => break 'liberate reply_group_simple(&ctx, &message, e).await,
-    //                 } {
-    //                     break 'liberate reply_group_simple(
-    //                         &ctx,
-    //                         &message,
-    //                         format!("不存在ID={}的表情包。", id),
-    //                     )
-    //                     .await;
-    //                 }
-    //                 match self
-    //                     .backend()
-    //                     .sticker_liberate_one(is_superuser.is_ok(), openid, id)
-    //                     .await
-    //                 {
-    //                     Ok(()) => {
-    //                         reply_group_simple(
-    //                             &ctx,
-    //                             &message,
-    //                             format!("公有化了ID={}的表情包。", id),
-    //                         )
-    //                         .await
-    //                     }
-    //                     Err(e) => reply_group_simple(&ctx, &message, e).await,
-    //                 }
-    //             } else {
-    //                 break 'liberate reply_group_simple_str(&ctx, &message, "liberate [表情ID]")
-    //                     .await;
-    //             }
-    //         }
-    //
-    //         "/si" => '_si: {
-    //             // Sticker Inspect -
-    //             // /si <sticker_id> [optional_operation  [optional_parameters]]
-    //             let help = || {
-    //                 return reply_group_simple_str(
-    //                     &ctx,
-    //                     &message,
-    //                     concat!(
-    //                         "/si - Sticker Inspection 表情图修改\n",
-    //                         "  /si <ID> [可选操作 [可选参数 ...]]\n",
-    //                         "  当未提供操作时，将显示此表情的详细信息；\n",
-    //                         "可用的操作有：\n",
-    //                         "  set-tag <新Tag>\n",
-    //                         "当您要对某个表情进行操作时，您必须是上传者本人或者超级用户。",
-    //                     ),
-    //                 );
-    //             };
-    //             if params.len() == 0 {
-    //                 break '_si help().await;
-    //             }
-    //
-    //             let id = match params.remove(0).parse::<i64>() {
-    //                 Ok(id) => id,
-    //                 Err(e) => {
-    //                     break '_si reply_group_simple_str(
-    //                         &ctx,
-    //                         &message,
-    //                         "您输入的ID无法解析为整数。",
-    //                     )
-    //                     .await;
-    //                 }
-    //             };
-    //
-    //             if params.len() == 0 {
-    //                 break '_si match self.backend().sticker_inspect_simple(id).await {
-    //                     Ok(result) => match result {
-    //                         Some(result) => {
-    //                             reply_group_simple(
-    //                                 &ctx,
-    //                                 &message,
-    //                                 format!(
-    //                                     concat!(
-    //                                         "ID={}\n",
-    //                                         "Tags=\"{}\"\n",
-    //                                         "上传于 {}\n\n",
-    //                                         "所属域ID={}\n",
-    //                                         "上传者ID={}\n",
-    //                                         "view_level={}",
-    //                                     ),
-    //                                     id,
-    //                                     result.tags,
-    //                                     result.added_date,
-    //                                     result.domain_openid,
-    //                                     result.uploader_openid,
-    //                                     result.view_level
-    //                                 ),
-    //                             )
-    //                             .await
-    //                         }
-    //                         None => {
-    //                             reply_group_simple_str(
-    //                                 &ctx,
-    //                                 &message,
-    //                                 "您输入的ID未匹配任何表情包。",
-    //                             )
-    //                             .await
-    //                         }
-    //                     },
-    //                     Err(e) => reply_group_simple(&ctx, &message, e.into()).await,
-    //                 };
-    //             }
-    //
-    //             let sender_openid = match get_sender_openid_group_msg(&message) {
-    //                 Ok(result) => result,
-    //                 Err(e) => {
-    //                     break '_si reply_group_simple(
-    //                         &ctx,
-    //                         &message,
-    //                         format!("获取发送者OpenID失败：{}", e),
-    //                     )
-    //                     .await;
-    //                 }
-    //             };
-    //
-    //             let uploader = match self.backend().sticker_uploader_openid_query(id).await {
-    //                 Ok(uploader) => uploader,
-    //                 Err(e) => {
-    //                     break '_si reply_group_simple(
-    //                         &ctx,
-    //                         &message,
-    //                         format!("查询表情包上传者失败：{}", e),
-    //                     )
-    //                     .await;
-    //                 }
-    //             };
-    //
-    //             let is_superuser = self.verify_superuser_privilege_group(&message);
-    //
-    //             if !uploader.eq(sender_openid) && is_superuser.is_err() {
-    //                 break '_si reply_group_simple(
-    //                     &ctx,
-    //                     &message,
-    //                     format!(
-    //                         "您不是表情包的上传者或者超级用户（{}），无法操作这个表情包。",
-    //                         is_superuser.unwrap_err()
-    //                     ),
-    //                 )
-    //                 .await;
-    //             }
-    //
-    //             match params[0] {
-    //                 "set-tag" => {
-    //                     if params.len() != 2 {
-    //                         break '_si help().await;
-    //                     }
-    //                     match self.backend().sticker_set_tags(id, params[1]).await {
-    //                         Ok(_) => {
-    //                             reply_group_simple_str(
-    //                                 &ctx,
-    //                                 &message,
-    //                                 "成功修改了指定表情包的标签。",
-    //                             )
-    //                             .await
-    //                         }
-    //                         Err(e) => reply_group_simple(&ctx, &message, e.into()).await,
-    //                     }
-    //                 }
-    //                 _ => help().await,
-    //             }
-    //         }
-    //
-    //         "ssi" => 'ssi: {
-    //             if params.len() == 0 {
-    //                 break 'ssi reply_group_simple_str(&ctx, &message, "必须指定搜索关键字。")
-    //                     .await;
-    //             }
-    //
-    //             match self
-    //                 .backend()
-    //                 .sticker_id_query_domainless(params.join(" "))
-    //                 .await
-    //             {
-    //                 Ok(result) => {
-    //                     let result = result
-    //                         .iter()
-    //                         .map(|it| format!("ID={}", it))
-    //                         .collect::<Vec<String>>()
-    //                         .join("\n");
-    //                     info!("查询结果：\n{}", result);
-    //                     reply_group_simple(&ctx, &message, result).await
-    //                 }
-    //                 Err(e) => {
-    //                     error!("数据库操作失败\n{}", e);
-    //                     reply_group_simple(&ctx, &message, e).await
-    //                 }
-    //             }
-    //         }
+
     //
     //         unknown => reply_group_simple(&ctx, &message, format!("未知的指令：{}", unknown)).await,
     //     }?;

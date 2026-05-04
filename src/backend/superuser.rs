@@ -49,6 +49,7 @@ impl SuperUserState {
         }
     }
 
+    // FIXME: return state enum, not message
     pub fn verify_superuser_privilege_group(&self, author_openid: &str) -> Result<(), String> {
         if *self.superuser_verify_timestamp.read().unwrap() + chrono::Duration::minutes(30)
             < Utc::now()
@@ -59,5 +60,17 @@ impl SuperUserState {
         } else {
             Err("用户没有超级用户权限".into())
         }
+    }
+
+    pub fn superuser_enter(&self, author_openid: &str){
+        self.superuser_openid.write().unwrap().push_str(author_openid);
+    }
+
+    pub fn superuser_exit(&self, author_openid: &str) -> Result<(), String> {
+        if self.verify_superuser_privilege_group(author_openid).is_err() {
+            return Err("您当前未拥有超级用户权限，无法退出超级用户权限".into())
+        }
+        self.superuser_openid.write().unwrap().clear();
+        Ok(())
     }
 }
