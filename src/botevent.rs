@@ -122,6 +122,7 @@ impl Default for BotEventHandler {
         ret.register_command(Box::new(command::slash_su::SlashSu::default()));
         ret.register_command(Box::new(command::slash_ss::SlashSs));
         ret.register_command(Box::new(command::slash_si::SlashSi));
+        ret.register_command(Box::new(command::slash_sr::SlashSr));
         ret.register_command(Box::new(command::ssi::Ssi));
         ret.register_command(Box::new(command::liberate::Liberate));
         ret.register_command(Box::new(command::liberator::Liberator));

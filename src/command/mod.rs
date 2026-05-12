@@ -7,6 +7,7 @@ pub mod su;
 pub mod liberate;
 pub mod liberator;
 pub mod ssi;
+pub(crate) mod slash_sr;
 
 use std::sync::Arc;
 use tokio::sync::Mutex;

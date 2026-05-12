@@ -3,7 +3,7 @@ use tracing::info;
 use crate::backend::backend::DbMetaResult;
 use crate::error_glue::CrustaneError;
 
-const CURRENT_DB_VERSION: i64 = 2;
+const CURRENT_DB_VERSION: i64 = 3;
 
 async fn create_initial_tables(pool: &sqlx::SqlitePool) -> Result<(), sqlx::Error> {
     query(
@@ -27,7 +27,17 @@ async fn create_initial_tables(pool: &sqlx::SqlitePool) -> Result<(), sqlx::Erro
             added_date TEXT NOT NULL,
             domain_openid TEXT,
             view_level INTEGER NOT NULL,
-            uploader_openid TEXT NOT NULL,
+            uploader_openid TEXT NOT NULL
+        );
+        -- Deleted stickers table
+        CREATE TABLE IF NOT EXISTS stickers_deleted (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            filename TEXT NOT NULL,
+            tags TEXT NOT NULL,
+            added_date TEXT NOT NULL,
+            domain_openid TEXT,
+            view_level INTEGER NOT NULL,
+            uploader_openid TEXT NOT NULL
         );
 
         -- Stickers search table
@@ -148,6 +158,23 @@ pub async fn database_migration_or_initialization(
                 .fetch_all(pool)
                 .await?;
             version = database_upgraded_to(pool, 2).await?;
+        }
+
+        if version == 2 {
+            // V2 -> V3: 创建虚拟删除表
+            query(
+            "CREATE TABLE IF NOT EXISTS stickers_deleted (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    filename TEXT NOT NULL,
+                    tags TEXT NOT NULL,
+                    added_date TEXT NOT NULL,
+                    domain_openid TEXT,
+                    view_level INTEGER NOT NULL,
+                    uploader_openid TEXT NOT NULL
+                );")
+            .fetch_all(pool)
+            .await?;
+            version = database_upgraded_to(pool, 3).await?;
         }
 
         info!("数据库已升级到版本{}。", version);

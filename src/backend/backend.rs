@@ -271,6 +271,30 @@ LIMIT 20")
             }
     }
 
+    pub async fn sticker_query_random(
+        &self,
+        user_openid: &str,
+        group_openid: &str,
+        limit: u32
+    ) -> Result<Vec<StickerQueryResultSimple>, String> {
+        match query_as::<_, StickerQueryResultSimple>("
+SELECT s.id, s.filename, s.tags
+FROM stickers s
+WHERE
+    (s.domain_openid IN (?, ?) OR s.view_level = 0)
+LIMIT ? OFFSET (
+  ABS(RANDOM()) % (SELECT COUNT(*) FROM stickers)
+)
+")
+            .bind(user_openid)
+            .bind(group_openid)
+            .bind(limit)
+            .fetch_all(&self.db).await {
+            Ok(result) => Ok(result),
+            Err(e) => Err(format!("数据库操作出错：{}", e)),
+        }
+    }
+
     pub async fn sticker_id_query_domainless(&self, keyword: String) -> Result<Vec<i64>, String> {
         match query_as::<_, StickerIdQueryResult>(
             "
@@ -330,6 +354,30 @@ LIMIT 20")
         {
             Ok(result) => Ok(result.len() != 0),
             Err(e) => Err(format!("数据库操作出错：{}", e)),
+        }
+    }
+
+    pub async fn sticker_delete(&self, id: i64) -> Result<(), String> {
+        if let Some(x) = self.sticker_inspect_simple(id).await? {
+            let output_path = self.sticker_store_path.join(&x.filename);
+
+            if let Err(e) = query("
+                BEGIN;
+
+                INSERT INTO stickers_deleted SELECT * FROM stickers WHERE id=?;
+                DELETE FROM stickers WHERE id=?;
+
+                END;")
+                .bind(id)
+                .bind(id)
+                .fetch_all(&self.db)
+                .await {
+                Err(format!("删除表情失败：{}", e.to_string()))
+            } else {
+                Ok(())
+            }
+        } else {
+            Err("找不到指定ID的表情。".into())
         }
     }
 

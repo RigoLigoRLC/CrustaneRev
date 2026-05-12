@@ -25,7 +25,9 @@ impl BotCommand for SlashSi {
                     "  当未提供操作时，将显示此表情的详细信息；\n",
                     "可用的操作有：\n",
                     "  set-tag <新Tag> [<新Tag>...]\n",
-                    "    为表情包设置新Tag。可指定一至多个Tag。Tag之间将用空格连接。",
+                    "    为表情包设置新Tag。可指定一至多个Tag。Tag之间将用空格连接。\n",
+                    "  delete\n",
+                    "    删除此表情包。\n",
                     "当您要对某个表情进行操作时，您必须是上传者本人或者超级用户。",
                 ).to_string(),
                 None
@@ -116,6 +118,12 @@ impl BotCommand for SlashSi {
                 let new_tag = params.join(" ");
                 match { backend.lock().await.sticker_set_tags(id, new_tag.as_str()).await } {
                     Ok(_) => msg.reply_plain("成功修改了指定表情包的标签。".into(), None).await,
+                    Err(e) => msg.reply_plain(e.into(), None).await,
+                }
+            }
+            "delete" => {
+                match { backend.lock().await.sticker_delete(id).await } {
+                    Ok(_) => msg.reply_plain("成功删除了指定表情包。".into(), None).await,
                     Err(e) => msg.reply_plain(e.into(), None).await,
                 }
             }
