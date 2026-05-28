@@ -656,15 +656,16 @@ dependencies = [
 
 [[package]]
 name = "botrs"
-version = "0.2.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c0a2f50d805ec3794f1c20275ae3b86ced94adaa42069683e791cf6d8af23e5d"
+version = "0.12.2"
+source = "git+https://github.com/YinMo19/botrs.git?rev=0cc2229a4694ad51f830a1d5bb7daf69dbb0009f#0cc2229a4694ad51f830a1d5bb7daf69dbb0009f"
 dependencies = [
  "anyhow",
  "async-trait",
  "base64 0.21.7",
  "chrono",
+ "ed25519-dalek",
  "futures-util",
+ "hex",
  "reqwest",
  "serde",
  "serde_json",

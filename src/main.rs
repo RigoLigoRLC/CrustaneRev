@@ -36,7 +36,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let token = Token::from_env().unwrap();
 
     // 设置意图
-    let intents = Intents::default();
+    let intents = Intents::none()
+        .with_public_messages();
 
     // 创建客户端
     let mut client = Client::new(token, intents, BotEventHandler::default(), true)?;

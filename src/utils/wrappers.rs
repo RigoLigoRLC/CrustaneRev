@@ -130,7 +130,16 @@ impl WrappedMessage for GroupMessage {
     }
 
     fn timestamp(&self) -> Result<DateTime<Utc>, CrustaneError> {
-        self.timestamp.ok_or("message的timestamp为空".into())
+        // Timestamp parsing was removed from botrs in some time between 0.2.6 and 0.12.2.
+        // Timestamp would look like such: "2026-05-26T23:13:34+08:00"
+        self.timestamp
+            .as_deref()
+            .ok_or("message的timestamp为空".into())
+            .and_then(|x| {
+                DateTime::parse_from_rfc3339(x)
+                    .map_err(|x| x.to_string().into())
+                    .map(|x| x.with_timezone(&Utc))
+            })
     }
 
     fn author(&self) -> Result<&(dyn WrappedUser + Send + Sync), CrustaneError> {
@@ -172,7 +181,16 @@ impl WrappedMessage for C2CMessage {
     }
 
     fn timestamp(&self) -> Result<DateTime<Utc>, CrustaneError> {
-        self.timestamp.ok_or("message的timestamp为空".into())
+        // Timestamp parsing was removed from botrs in some time between 0.2.6 and 0.12.2.
+        // Timestamp would look like such: "2026-05-26T23:13:34+08:00"
+        self.timestamp
+            .as_deref()
+            .ok_or("message的timestamp为空".into())
+            .and_then(|x| {
+                DateTime::parse_from_rfc3339(x)
+                    .map_err(|x| x.to_string().into())
+                    .map(|x| x.with_timezone(&Utc))
+            })
     }
 
     fn author(&self) -> Result<&(dyn WrappedUser + Send + Sync), CrustaneError> {
