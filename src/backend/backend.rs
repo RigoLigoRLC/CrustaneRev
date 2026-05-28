@@ -441,6 +441,64 @@ LIMIT ? OFFSET (
         }
     }
 
+    pub async fn sticker_upload_simple(
+        &self,
+        ctx: &Context,
+        recipient_type: WrappedMessageType,
+        openid: &str,
+        id: i64,
+        filename: String,
+    ) -> Result<Media, CrustaneError> {
+        match self.sticker_upload_cache_check(id, recipient_type).await? {
+            Some(x) => Ok(x),
+            None => self.sticker_upload_to_tencent(
+                ctx,
+                recipient_type,
+                openid,
+                id,
+                filename,
+            ).await
+        }
+    }
+
+    pub async fn sticker_upload_cache_check(
+        &self,
+        id: i64,
+        recipient_type: WrappedMessageType
+    ) -> Result<Option<Media>, CrustaneError> {
+        let chat_type = match recipient_type {
+            WrappedMessageType::C2CMessage => 0,
+            WrappedMessageType::GroupMessage => 1,
+        };
+        let result = query_as::<_, StickerCacheTencentQueryResult>(
+            "SELECT s.media, s.expiration_timestamp FROM sticker_cache_tencent s WHERE s.id=? AND s.chat_type=?"
+        ).bind(id).bind(chat_type).fetch_all(&self.db).await?;
+
+        let first_result = result.first();
+        if result.is_empty()
+            || Utc::now().timestamp() + 300 > first_result.unwrap().expiration_timestamp {
+            // Have never been uploaded to Tencent at all, or Tencent cache will soon expire
+            Ok(None)
+        } else {
+            let media_str = &first_result.unwrap().media;
+            match serde_json::from_str::<Media>(media_str.as_ref()) {
+                Ok(media) => Ok(Some(media)),
+                Err(e) => {
+                    error!(
+                        "Invalid JSON entry in Tencent cache layer, id={}, json={}",
+                        id, media_str
+                    );
+                    // 删除掉有问题的项
+                    query("DELETE FROM sticker_cache_tencent where id=?")
+                        .bind(id)
+                        .fetch_all(&self.db)
+                        .await?;
+                    Ok(None)
+                }
+            }
+        }
+    }
+
     pub async fn sticker_upload_to_s3(
         &self,
         id: i64,
@@ -516,91 +574,64 @@ LIMIT ? OFFSET (
             WrappedMessageType::GroupMessage => 1,
         };
 
-        let result = query_as::<_, StickerCacheTencentQueryResult>(
-            "SELECT s.media, s.expiration_timestamp FROM sticker_cache_tencent s WHERE s.id=? AND s.chat_type=?"
-        ).bind(id).bind(chat_type).fetch_all(&self.db).await?;
+        let s3_url = self.sticker_upload_to_s3(id, &filename).await?;
 
-        let first_result = result.first();
-        if result.is_empty()
-            || Utc::now().timestamp() + 300 > first_result.unwrap().expiration_timestamp
-        {
-            // Have never been uploaded to Tencent at all, or Tencent cache will soon expire
-            let s3_url = self.sticker_upload_to_s3(id, &filename).await?;
-
-            // Try upload to Tencent
-            let result = match recipient_type {
-                WrappedMessageType::C2CMessage => {
-                    ctx.api
-                        .post_c2c_file(
-                            &ctx.token,
-                            openid,
-                            1, // image,
-                            s3_url.as_str(),
-                            None,
-                        )
-                        .await?
-                }
-                WrappedMessageType::GroupMessage => {
-                    ctx.api
-                        .post_group_file(
-                            &ctx.token,
-                            openid,
-                            1, // image
-                            s3_url.as_str(),
-                            None,
-                        )
-                        .await?
-                }
-            };
-            let result_str = format!("{}", result);
-            let media = match serde_json::from_value::<Media>(result) {
-                Ok(media) => media,
-                Err(e) => {
-                    error!("Uploading to Tencent failed: {}", result_str);
-                    return Err(format!(
-                        "Error when serde_json::from_value::<Media> from request result: {}",
-                        e
+        // Try upload to Tencent
+        let result = match recipient_type {
+            WrappedMessageType::C2CMessage => {
+                ctx.api
+                    .post_c2c_file(
+                        &ctx.token,
+                        openid,
+                        1, // image,
+                        s3_url.as_str(),
+                        None,
                     )
-                    .into());
-                }
-            };
-
-            // Insert to database
-            let _ = query(
-                "
-                INSERT INTO sticker_cache_tencent (id, media, expiration_timestamp, chat_type)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT (id) DO UPDATE SET
-                    media = excluded.media,
-                    expiration_timestamp = excluded.expiration_timestamp
-            ",
-            )
-            .bind(id)
-            .bind(result_str)
-            .bind(Utc::now().timestamp() + media.ttl.unwrap_or(86400) as i64)
-            .bind(chat_type)
-            .fetch_all(&self.db)
-            .await?;
-
-            Ok(media)
-        } else {
-            let media_str = &first_result.unwrap().media;
-            match serde_json::from_str::<Media>(media_str.as_ref()) {
-                Ok(media) => Ok(media),
-                Err(e) => {
-                    error!(
-                        "Invalid JSON entry in Tencent cache layer, id={}, json={}",
-                        id, media_str
-                    );
-                    // 删除掉有问题的项
-                    query("DELETE FROM sticker_cache_tencent where id=?")
-                        .bind(id)
-                        .fetch_all(&self.db)
-                        .await?;
-                    Err(e.into())
-                }
+                    .await?
             }
-        }
+            WrappedMessageType::GroupMessage => {
+                ctx.api
+                    .post_group_file(
+                        &ctx.token,
+                        openid,
+                        1, // image
+                        s3_url.as_str(),
+                        None,
+                    )
+                    .await?
+            }
+        };
+        let result_str = format!("{}", result);
+        let media = match serde_json::from_value::<Media>(result) {
+            Ok(media) => media,
+            Err(e) => {
+                error!("Uploading to Tencent failed: {}", result_str);
+                return Err(format!(
+                    "Error when serde_json::from_value::<Media> from request result: {}",
+                    e
+                )
+                .into());
+            }
+        };
+
+        // Insert to database
+        let _ = query(
+            "
+            INSERT INTO sticker_cache_tencent (id, media, expiration_timestamp, chat_type)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT (id) DO UPDATE SET
+                media = excluded.media,
+                expiration_timestamp = excluded.expiration_timestamp
+        ",
+        )
+        .bind(id)
+        .bind(result_str)
+        .bind(Utc::now().timestamp() + media.ttl.unwrap_or(86400) as i64)
+        .bind(chat_type)
+        .fetch_all(&self.db)
+        .await?;
+
+        Ok(media)
     }
 
     pub async fn sticker_liberator_ops(

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use crate::backend::backend::{Backend, StickerLiberatorOperation, StickerRecipient};
 use crate::error_glue::CrustaneError;
 use crate::init::initialize_backend;
-use crate::utils::wrappers::CommonMessage;
+use crate::utils::wrappers::{CommonMessage, SeqCounter};
 use crate::utils::{
     get_group_openid_group_msg, get_sender_openid_group_msg, get_totp, reply_c2c_simple_str,
     reply_group_simple, reply_group_simple_str, reply_group_with_media, sec_to_duration_dhms,
@@ -68,7 +68,11 @@ impl BotEventHandler {
                 .trigger(self.backend(), &msg)
                 .await
         } else {
-            msg.reply_plain(format!("命令“{}”无法找到", command_prefix), None).await
+            msg.reply_plain_with_seq(
+                format!("命令“{}”无法找到", command_prefix),
+                None,
+                Some(&mut SeqCounter { count: 100 }) // Use a large enough seq
+            ).await
         }
     }
 }

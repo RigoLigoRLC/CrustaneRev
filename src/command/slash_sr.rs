@@ -38,7 +38,7 @@ impl BotCommand for SlashSr {
                 } else {
                     let candidate = result.into_iter().next().unwrap();
                     let media = match {
-                        backend.lock().await.sticker_upload_to_tencent(
+                        backend.lock().await.sticker_upload_simple(
                             &msg.context,
                             msg.msg.msg_type(),
                             msg.msg.source_openid()?,
