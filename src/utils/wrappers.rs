@@ -1,8 +1,7 @@
-use std::ops::{Index, Range};
 
+use std::ops::{Index, Range};
 use botrs::{C2CMessage, C2CMessageParams, C2CMessageUser, Context, GroupMessage, GroupMessageParams, GroupMessageUser, Media, MessageAttachment, Reference};
 use chrono::{DateTime, Utc};
-use crate::backend::backend::StickerRecipient;
 use crate::error_glue::CrustaneError;
 use crate::utils;
 
@@ -78,9 +77,19 @@ impl WrappedUser for C2CMessageUser {
     }
 }
 
+#[derive(Copy, Clone)]
 pub enum WrappedMessageType {
     GroupMessage,
     C2CMessage,
+}
+
+impl Into<i32> for WrappedMessageType {
+    fn into(self) -> i32 {
+        match self {
+            WrappedMessageType::GroupMessage => 0,
+            WrappedMessageType::C2CMessage => 1,
+        }
+    }
 }
 
 pub trait WrappedMessage {
@@ -104,6 +113,10 @@ pub trait WrappedMessage {
 
     /// Get the OpenID of message source. Group OpenID for GroupMessage, User OpenID for C2CMessage.
     fn source_openid(&self) -> Result<&str, CrustaneError>;
+
+    /// Get the quoted message, if available. If the value is Err it means we failed to parse the
+    /// quoted message. If the value is Ok(None), it means no message is quoted.
+    fn quoted_msg(&self) -> Result<Option<Box<dyn WrappedMessage + Send + Sync>>, CrustaneError>;
 }
 
 impl WrappedMessage for GroupMessage {
@@ -155,6 +168,20 @@ impl WrappedMessage for GroupMessage {
             .map(|x| x.as_str())
             .ok_or("message的group_openid为空".into())
     }
+
+    fn quoted_msg(&self) -> Result<Option<Box<dyn WrappedMessage + Send + Sync>>, CrustaneError> {
+        let msg_elements = self.msg_elements.as_ref().map(|x| x.as_array()).flatten();
+        if let Some(msg_elements) = msg_elements && msg_elements.len() >= 1 {
+            let parsed_quote = serde_json::from_value::<GroupMessage>(msg_elements[0].clone());
+            if let Ok(msg) = parsed_quote {
+                Ok(Some(Box::new(msg)))
+            } else {
+                Err(format!("无法解析引用的消息：{}", parsed_quote.unwrap_err()).into())
+            }
+        } else {
+            Ok(None)
+        }
+    }
 }
 
 impl WrappedMessage for C2CMessage {
@@ -202,6 +229,20 @@ impl WrappedMessage for C2CMessage {
 
     fn source_openid(&self) -> Result<&str, CrustaneError> {
         self.author()?.openid()
+    }
+
+    fn quoted_msg(&self) -> Result<Option<Box<dyn WrappedMessage + Send + Sync>>, CrustaneError> {
+        let msg_elements = self.msg_elements.as_ref().map(|x| x.as_array()).flatten();
+        if let Some(msg_elements) = msg_elements && msg_elements.len() >= 1 {
+            let parsed_quote = serde_json::from_value::<C2CMessage>(msg_elements[0].clone());
+            if let Ok(msg) = parsed_quote {
+                Ok(Some(Box::new(msg)))
+            } else {
+                Err(format!("无法解析引用的消息：{}", parsed_quote.unwrap_err()).into())
+            }
+        } else {
+            Ok(None)
+        }
     }
 }
 
@@ -309,6 +350,15 @@ impl CommonMessage {
         content: String,
         media: Option<Media>,
     ) -> Result<(), CrustaneError> {
+        self.reply_plain_with_seq(content, media, None).await
+    }
+
+    pub async fn reply_plain_with_seq(
+        &self,
+        content: String,
+        media: Option<Media>,
+        seq_counter: Option<&mut SeqCounter>,
+    ) -> Result<(), CrustaneError> {
         let msg_id_str = self.msg.id()?.to_string();
         match self.msg.msg_type() {
             WrappedMessageType::C2CMessage => {
@@ -321,6 +371,7 @@ impl CommonMessage {
                         ignore_get_message_error: Some(true),
                     }),
                     media,
+                    msg_seq: seq_counter.map(|x| { x.count += 1; x.count }),
                     ..Default::default()
                 };
 
@@ -342,6 +393,7 @@ impl CommonMessage {
                         ignore_get_message_error: Some(true),
                     }),
                     media,
+                    msg_seq: seq_counter.map(|x| { x.count += 1; x.count }),
                     ..Default::default()
                 };
 
@@ -353,6 +405,16 @@ impl CommonMessage {
                     .map_err(|e| e.into())
             }
         }
+    }
+}
+
+pub struct SeqCounter {
+    pub count: u32,
+}
+
+impl SeqCounter {
+    pub fn new() -> SeqCounter {
+        SeqCounter { count: 1 }
     }
 }
 

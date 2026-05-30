@@ -7,6 +7,7 @@ use crate::command::BotCommand;
 use crate::error_glue::CrustaneError;
 use crate::utils::{get_group_openid_group_msg, get_sender_openid_group_msg, reply_group_simple, reply_group_simple_str};
 use crate::utils::wrappers::CommonMessage;
+use crate::utils::wrappers::{CommonMessage, WrappedMessage};
 
 pub struct SlashSu {
     facetype_garbage_regex: Regex,
@@ -26,9 +27,42 @@ impl BotCommand for SlashSu {
         let mut param_cursor = 1usize;
 
         // Ensure exactly one image attachment
-        if msg.msg.attachments()?.len() != 1 {
+        let quoted_msg;
+        let (atta_filename, atta_url) = if msg.msg.attachments()?.len() == 1 {
+            let atta = msg.msg.attachments()?.first().unwrap();
+            (atta.filename.as_ref().unwrap(), atta.url.as_ref().unwrap())
+        } else if msg.msg.attachments()?.len() > 1 {
+            // More than one image is provided
             return msg.reply_plain("需要在消息中附带1个图片才可使用。".into(), None).await;
-        }
+        } else {
+            // If no attachments found, check "msg_elements" for a quoted message
+            match msg.msg.quoted_msg() {
+                Ok(quote) => {
+                    match quote {
+                        None => {
+                            // No quoted message
+                            return msg.reply_plain("需要在消息中附带1个图片才可使用。".into(), None).await;
+                        }
+                        Some(quote) => {
+                            quoted_msg = quote;
+                            if quoted_msg.attachments()?.len() == 1 {
+                                let atta = quoted_msg.attachments()?.first().unwrap();
+                                (atta.filename.as_ref().unwrap(), atta.url.as_ref().unwrap())
+                            } else {
+                                return msg.reply_plain("需要在消息中附带1个图片才可使用。".into(), None).await;
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    // Parse failed
+                    return msg.reply_plain(
+                        format!("需要在消息中附带1个图片才可使用。\n\n引用消息解析失败：{}", e).into(),
+                        None
+                    ).await;
+                }
+            }
+        };
 
         // Get the corresponding OpenID for the specified domain
         let domain = if params.len() >= 2 && params[param_cursor].starts_with(".") {
@@ -47,7 +81,17 @@ impl BotCommand for SlashSu {
 
         // After removing domain specifier, there should be at least one argument left
         if params.len() == param_cursor {
-            return msg.reply_plain("必须为表情图片指定标签才可添加。".into(), None).await;
+            // #[cfg(not(target_os = "macos"))]
+            // {
+                return msg.reply_plain("必须为表情图片指定标签才可添加。".into(), None).await;
+            // }
+
+            // #[cfg(target_os = "macos")]
+            // {
+            //     // Extract a tag with Vision.framework
+            //
+            //     let data = objc2_foundation::NSData::from_vec()
+            // }
         }
 
         // Join all specified tags with space
@@ -61,20 +105,14 @@ impl BotCommand for SlashSu {
             .to_string();
 
         // Generate a UUID as the image file name
-        let atta = msg.msg.attachments()?.first().unwrap();
         let filename = format!(
             "{}.{}",
             uuid::Uuid::new_v4().to_string(),
-            if atta.content_type.as_ref().is_none() {
-                "jpg"
-            } else {
-                let content_type = atta.content_type.as_ref().unwrap();
-                content_type.split('/').last().unwrap()
-            }
+            atta_filename.split('.').last().unwrap()
         );
 
         match backend.lock().await.handle_sticker_upload(
-            atta.url.as_ref().unwrap(),
+            &atta_url,
             filename,
             domain_openid,
             uploader_openid,

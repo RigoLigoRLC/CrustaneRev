@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-botrs = { git = "https://github.com/YinMo19/botrs.git", rev = "0cc2229a4694ad51f830a1d5bb7daf69dbb0009f" }
+botrs = { git = "https://github.com/RigoLigoRLC/botrs.git", rev = "4543b96b2e0954d9bb9704dbbae388fcdbd3b481" }
 tokio = { version = "1.0", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
