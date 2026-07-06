@@ -42,6 +42,8 @@ impl SuperUserState {
 
         if challenge == *self.last_totp_code.read().unwrap() {
             Err("无法执行：此TOTP Challenge刚刚成功使用过。".into())
+        } else if !totp_code.unwrap().eq(challenge) {
+            Err("无法执行：TOTP Challenge校验失败。".into())
         } else {
             *self.last_totp_code.write().unwrap() = challenge.into();
             *self.superuser_verify_timestamp.write().unwrap() = Utc::now();
