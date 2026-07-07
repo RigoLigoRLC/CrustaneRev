@@ -1,6 +1,7 @@
 use crate::error_glue::CrustaneError;
 use crate::utils;
 use aws_config::{defaults, BehaviorVersion};
+use aws_sdk_s3::error::DisplayErrorContext;
 use aws_sdk_s3::primitives::ByteStream;
 use botrs::{Context, GroupMessage, Media};
 use chrono::{DateTime, FixedOffset, ParseResult, TimeZone, Utc};
@@ -534,7 +535,9 @@ LIMIT ? OFFSET (
                 .await
             {
                 Ok(result) => result,
-                Err(e) => return Err(format!("S3 Error: {}", e).into()),
+                Err(e) => {
+                    return Err(format!("S3 Error: {}", DisplayErrorContext(e)).into())
+                }
             };
             query(
                 "
