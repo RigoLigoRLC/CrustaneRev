@@ -22,15 +22,7 @@ impl SuperUserState {
     }
 
     pub fn verify_totp_challenge(&self, challenge: &str) -> Result<(), String> {
-        let totp = get_totp();
-
-        if totp.is_err() {
-            let err_msg = format!("创建TOTP生成器失败：{}", totp.unwrap_err().to_string());
-            tracing::log::warn!("{}", err_msg);
-            return Err(err_msg);
-        }
-
-        let totp_code = totp.unwrap().generate_current();
+        let totp_code = self.totp_gen.generate_current();
         if totp_code.is_err() {
             let err_msg = format!(
                 "生成TOTP Challenge失败：{}",
