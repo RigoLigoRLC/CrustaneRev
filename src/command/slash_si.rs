@@ -26,6 +26,8 @@ impl BotCommand for SlashSi {
                     "可用的操作有：\n",
                     "  set-tag <新Tag> [<新Tag>...]\n",
                     "    为表情包设置新Tag。可指定一至多个Tag。Tag之间将用空格连接。\n",
+                    "  append-tag <额外Tag> [<额外Tag>...]\n",
+                    "    为表情包增加更多Tag。可指定一至多个Tag。Tag之间将用空格连接。\n",
                     "  delete\n",
                     "    删除此表情包。\n",
                     "当您要对某个表情进行操作时，您必须是上传者本人或者超级用户。",
@@ -116,6 +118,30 @@ impl BotCommand for SlashSi {
                     return help().await;
                 }
                 let new_tag = params.join(" ");
+                match { backend.lock().await.sticker_set_tags(id, new_tag.as_str()).await } {
+                    Ok(_) => msg.reply_plain("成功修改了指定表情包的标签。".into(), None).await,
+                    Err(e) => msg.reply_plain(e.into(), None).await,
+                }
+            }
+            "append-tag" => {
+                if params.peek().is_none() {
+                    return help().await;
+                }
+                // Fetch sticker tags via an inspection
+                let orig_tags = match backend.lock().await
+                    .sticker_inspect_simple(id).await.and_then(|x| {
+                    x.ok_or("ID查询结果为空".into())
+                }) {
+                    Ok(result) => {
+                        result.tags
+                    }
+                    Err(e) => {
+                        return msg.reply_plain(format!("无法获取原表情的Tag（{}）", e), None).await;
+                    }
+                };
+                // Move `params` into local scope so it won't try to live longer than orig_tags
+                let params = params;
+                let new_tag = [orig_tags.as_str()].into_iter().chain(params).join(" ");
                 match { backend.lock().await.sticker_set_tags(id, new_tag.as_str()).await } {
                     Ok(_) => msg.reply_plain("成功修改了指定表情包的标签。".into(), None).await,
                     Err(e) => msg.reply_plain(e.into(), None).await,
