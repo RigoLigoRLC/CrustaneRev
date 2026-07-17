@@ -97,7 +97,7 @@ impl BotCommand for SlashSi {
         };
 
         let is_superuser = {
-            backend.lock().await.superuser_state().verify_superuser_privilege_group(msg.msg.author()?.openid()?)
+            backend.lock().await.superuser_state().verify_superuser_privilege_group(msg.msg.author()?.member_or_openid()?)
         };
 
         if uploader.as_str() != sender_openid && is_superuser.is_err() {

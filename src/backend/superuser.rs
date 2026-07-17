@@ -2,6 +2,7 @@ use std::sync::RwLock;
 use chrono::{DateTime, Utc};
 use botrs::GroupMessage;
 use totp_rs::TOTP;
+use tracing::info;
 use crate::utils::{get_sender_openid_group_msg, get_totp};
 
 pub struct SuperUserState {
@@ -57,6 +58,7 @@ impl SuperUserState {
     }
 
     pub fn superuser_enter(&self, author_openid: &str){
+        info!("用户 OpenID={} 获取了超级用户权限", author_openid);
         self.superuser_openid.write().unwrap().push_str(author_openid);
     }
 
