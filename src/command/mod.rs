@@ -3,6 +3,7 @@ pub mod host;
 pub mod slash_su;
 pub mod slash_ss;
 pub mod slash_si;
+pub mod sql;
 pub mod su;
 pub mod liberate;
 pub mod liberator;

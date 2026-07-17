@@ -8,7 +8,8 @@ use chrono::{DateTime, FixedOffset, ParseResult, TimeZone, Utc};
 use regex::{Match, Regex};
 use sqlx::migrate::MigrateDatabase;
 use sqlx::sqlite::SqlitePoolOptions;
-use sqlx::{query, query_as, Column, Execute, FromRow, Row};
+use sqlx::{Column, Execute, FromRow, Row, TypeInfo, query, query_as};
+use std::fmt::Write;
 use std::ops::Deref;
 use std::path::PathBuf;
 use std::sync::{LazyLock, RwLock};
@@ -247,6 +248,57 @@ impl Backend {
                 Err(format!("数据库操作出错：{}{}", e, rm_msg))
             }
         }
+    }
+
+    pub async fn db_query(
+        &self,
+        query_content: &str
+    ) -> Result<String, String> {
+        match sqlx::query(query_content)
+            .fetch_all(&self.db)
+            .await {
+                Ok(result) => {
+                    let mut reply = String::with_capacity(512);
+                    let _ = write!(reply, "Query returned {} rows", result.len());
+                    if result.len() == 0 {
+                        Ok(reply)
+                    } else {
+                        reply.push_str("\n\n");
+
+                        // Write column names
+                        let col_count = result.first().unwrap().columns().len();
+                        for col in result.first().unwrap().columns() {
+                            let _ = write!(reply, "{},", col.name());
+                        }
+                        
+                        // Last comma gets removed
+                        let _ = reply.pop();
+                        
+                        // Write row data
+                        for row in result {
+                            // Add line return
+                            reply.push('\n');
+                            // Add each row
+                            for i in 0..col_count {
+                                let col = row.column(i);
+                                let _ = match col.type_info().name() {
+                                    "NULL" => write!(reply, "NULL|"),
+                                    "TEXT" => write!(reply, "{}|", row.get::<&str, usize>(i)),
+                                    "REAL" => write!(reply, "{}|", row.get::<f64, usize>(i)),
+                                    "INTEGER" => write!(reply, "{}|", row.get::<i64, usize>(i)),
+                                    _ => write!(reply, "[{}]|", col.type_info().name()),
+                                };
+
+                            }
+                            // Pop last '|'
+                            reply.pop();
+                        }
+
+                        Ok(reply)
+                    }
+                }
+                Err(e) => Err(format!("数据库操作出错：{}", e))
+            }
     }
 
     pub async fn sticker_query_simple(

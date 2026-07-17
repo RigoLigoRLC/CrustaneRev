@@ -122,6 +122,7 @@ impl Default for BotEventHandler {
         ret.register_command(Box::new(command::ping::Ping));
         ret.register_command(Box::new(command::host::Host));
         ret.register_command(Box::new(command::su::Su));
+        ret.register_command(Box::new(command::sql::Sql));
 
         ret.register_command(Box::new(command::slash_su::SlashSu::default()));
         ret.register_command(Box::new(command::slash_ss::SlashSs));
